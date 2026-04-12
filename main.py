@@ -26,7 +26,7 @@ def get_stock_data():
         r = requests.get(quote_url, headers=headers)
         df = pd.DataFrame(r.json().get("daily_quotes", []))
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error during API call: {e}")
         return [], []
 
     if df.empty: return [], []
@@ -45,12 +45,13 @@ def get_stock_data():
         if len(group) < 2: continue
         prev, curr = group.iloc[0], group.iloc[1]
         
-        info = name_map.get(code, {"CompanyName": "不明", "Sector17CodeName": "-"})
-        name = info["CompanyName"]
-        sector = info["Sector17CodeName"]
+        # 銘柄情報の取得（エラー防止のため get を使用し、Noneの場合は空文字にする）
+        info = name_map.get(code, {})
+        name = str(info.get("CompanyName") or "不明")
+        sector = str(info.get("Sector17CodeName") or "-")
         base_info = f"{code} {name} ({sector})\n{curr['Close']}円"
 
-        # 上昇優勢
+        # 上昇判定
         is_gc = (prev['ma5'] < prev['ma25']) and (curr['ma5'] > curr['ma25'])
         is_vol_spike_up = (curr['Volume'] > (curr['vol_avg'] * 2)) and (curr['Close'] > prev['Close'])
         
@@ -58,7 +59,7 @@ def get_stock_data():
             reason = "【GC】" if is_gc else "【出来高増】"
             up_list.append(f"{base_info} {reason}")
 
-        # 下落優勢
+        # 下落判定
         is_dc = (prev['ma5'] > prev['ma25']) and (curr['ma5'] < prev['ma25'])
         is_crash = (curr['Volume'] > (curr['vol_avg'] * 2)) and (curr['Close'] < prev['Close'] * 0.95)
         
