@@ -1,45 +1,61 @@
 import os
 import requests
 import pandas as pd
+import sys
 
-REFRESH_TOKEN = os.environ["JQUANTS_REFRESH_TOKEN"]
-CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-USER_ID = os.environ["LINE_USER_ID"]
+# Secretsから読み込み
+REFRESH_TOKEN = os.getenv("JQUANTS_REFRESH_TOKEN")
+CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+USER_ID = os.getenv("LINE_USER_ID")
 
 def get_stock_data():
-    # 認証URLを最新のものに固定
-    auth_url = f"[https://api.jquants.com/v1/token/auth_refresh?refreshtoken=](https://api.jquants.com/v1/token/auth_refresh?refreshtoken=){REFRESH_TOKEN}"
-    r = requests.post(auth_url)
+    # トークンが読み込めているかチェック（最重要）
+    if not REFRESH_TOKEN:
+        print("CRITICAL ERROR: JQUANTS_REFRESH_TOKEN is EMPTY")
+        return pd.DataFrame()
+
+    # 1. ログイン認証
+    auth_url = "[https://api.jquants.com/v1/token/auth_refresh](https://api.jquants.com/v1/token/auth_refresh)"
+    # トークンをURLに直接書かず、paramsとして渡す
+    r = requests.post(auth_url, params={"refreshtoken": REFRESH_TOKEN})
     
-    # ここでエラーが起きた場合に中身を表示するように変更
     if r.status_code != 200:
         print(f"ログイン失敗。ステータスコード: {r.status_code}")
         print(f"エラー内容: {r.text}")
-        return pd.DataFrame() # 空のデータを返す
-
-    data = r.json()
-    if "idToken" not in data:
-        print(f"レスポンスにidTokenが含まれていません。受け取ったデータ: {data}")
         return pd.DataFrame()
 
-    id_token = data["idToken"]
+    data = r.json()
+    id_token = data.get("idToken")
+    if not id_token:
+        print(f"idTokenが取得できませんでした。データ: {data}")
+        return pd.DataFrame()
+
     headers = {"Authorization": f"Bearer {id_token}"}
     
-    # 株価取得（日付を指定しないと最新が取れない場合があるため調整）
+    # 2. 株価取得
     r = requests.get("[https://api.jquants.com/v1/prices/daily_quotes](https://api.jquants.com/v1/prices/daily_quotes)", headers=headers)
     
     if r.status_code != 200:
         print(f"株価取得失敗。ステータスコード: {r.status_code}")
         return pd.DataFrame()
 
-    df = pd.DataFrame(r.json()["daily_quotes"])
-    # 4万円以下で買える銘柄
+    # データ変換
+    res_json = r.json()
+    if "daily_quotes" not in res_json:
+        print("株価データが含まれていません。")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(res_json["daily_quotes"])
+    # 4万円以下で買える銘柄（100株単位を考慮せず、単価のみで判定）
     target = df[df['Close'] < 40000].sort_values('Close', ascending=False)
     return target.head(5)
 
 def notify_line(message):
     url = "[https://api.line.me/v2/bot/message/push](https://api.line.me/v2/bot/message/push)"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"}
+    headers = {
+        "Content-Type": "application/json", 
+        "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"
+    }
     body = {"to": USER_ID, "messages": [{"type": "text", "text": message}]}
     requests.post(url, headers=headers, json=body)
 
