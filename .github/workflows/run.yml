@@ -1,14 +1,14 @@
 name: Daily Stock Check
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 7 * * 1-5'
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
