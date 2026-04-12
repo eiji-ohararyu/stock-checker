@@ -8,64 +8,85 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def get_stock_data():
-    if not REFRESH_TOKEN: return []
+    if not REFRESH_TOKEN: return [], []
     host = "api.jquants.com"
     
     try:
-        # ログイン
         auth_url = "https://" + host + "/v1/token/auth_refresh"
         r = requests.post(auth_url, params={"refreshtoken": REFRESH_TOKEN})
         id_token = r.json().get("idToken")
-        
-        # 株価データ取得
-        quote_url = "https://" + host + "/v1/prices/daily_quotes"
         headers = {"Authorization": "Bearer " + id_token}
+        
+        info_url = "https://" + host + "/v1/listed/info"
+        info_res = requests.get(info_url, headers=headers)
+        info_df = pd.DataFrame(info_res.json().get("info", []))
+        name_map = info_df.set_index('Code')[['CompanyName', 'Sector17CodeName']].to_dict('index')
+        
+        quote_url = "https://" + host + "/v1/prices/daily_quotes"
         r = requests.get(quote_url, headers=headers)
         df = pd.DataFrame(r.json().get("daily_quotes", []))
-    except:
-        return []
+    except Exception as e:
+        print(f"Error: {e}")
+        return [], []
 
-    if df.empty: return []
+    if df.empty: return [], []
 
-    # 銘柄ごとにソート
     df = df.sort_values(['Code', 'Date'])
-    
-    # 移動平均線と出来高平均の計算
     df['ma5'] = df.groupby('Code')['Close'].transform(lambda x: x.rolling(window=5).mean())
     df['ma25'] = df.groupby('Code')['Close'].transform(lambda x: x.rolling(window=25).mean())
     df['vol_avg'] = df.groupby('Code')['Volume'].transform(lambda x: x.rolling(window=5).mean())
 
-    # 直近2日分をチェック
     latest = df.groupby('Code').tail(2)
     
-    picked_stocks = []
+    up_list = []
+    down_list = []
+    
     for code, group in latest.groupby('Code'):
         if len(group) < 2: continue
+        prev, curr = group.iloc[0], group.iloc[1]
         
-        prev = group.iloc[0]
-        curr = group.iloc[1]
-        
-        # 判定：ゴールデンクロス または 出来高急増
-        is_gc = (prev['ma5'] < prev['ma25']) and (curr['ma5'] > curr['ma25'])
-        is_vol_spike = curr['Volume'] > (curr['vol_avg'] * 2)
-        
-        if curr['Close'] <= 10000 and (is_gc or is_vol_spike):
-            reason = "【GC】" if is_gc else "【出来高増】"
-            picked_stocks.append(f"{code}: {curr['Close']}円 {reason}")
+        info = name_map.get(code, {"CompanyName": "不明", "Sector17CodeName": "-"})
+        name = info["CompanyName"]
+        sector = info["Sector17CodeName"]
+        base_info = f"{code} {name} ({sector})\n{curr['Close']}円"
 
-    return picked_stocks
+        # 上昇優勢
+        is_gc = (prev['ma5'] < prev['ma25']) and (curr['ma5'] > curr['ma25'])
+        is_vol_spike_up = (curr['Volume'] > (curr['vol_avg'] * 2)) and (curr['Close'] > prev['Close'])
+        
+        if is_gc or is_vol_spike_up:
+            reason = "【GC】" if is_gc else "【出来高増】"
+            up_list.append(f"{base_info} {reason}")
+
+        # 下落優勢
+        is_dc = (prev['ma5'] > prev['ma25']) and (curr['ma5'] < prev['ma25'])
+        is_crash = (curr['Volume'] > (curr['vol_avg'] * 2)) and (curr['Close'] < prev['Close'] * 0.95)
+        
+        if is_dc or is_crash:
+            reason = "【デッドクロス】" if is_dc else "【急落】"
+            down_list.append(f"{base_info} {reason}")
+
+    return up_list, down_list
 
 def notify_line(message):
-    url = "[https://api.line.me/v2/bot/message/push](https://api.line.me/v2/bot/message/push)"
+    url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN}
     body = {"to": USER_ID, "messages": [{"type": "text", "text": message}]}
     requests.post(url, headers=headers, json=body)
 
 if __name__ == "__main__":
-    results = get_stock_data()
-    # results がリスト形式なので、len(results) > 0 で判定するように修正
-    if len(results) > 0:
-        msg = "【お宝スキャン】\n本日注目の銘柄が見つかりました：\n\n" + "\n".join(results[:5])
-        notify_line(msg)
+    up, down = get_stock_data()
+    
+    final_msg = ""
+    if up:
+        final_msg += "【判定：上昇優勢】\n以下の銘柄が見つかりました：\n\n" + "\n\n".join(up[:10])
+    
+    if down:
+        if final_msg: final_msg += "\n\n" + "───────────────" + "\n\n"
+        final_msg += "【判定：下落優勢】\n以下の銘柄が見つかりました：\n\n" + "\n\n".join(down[:10])
+    
+    if final_msg:
+        final_msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate"
+        notify_line(final_msg)
     else:
-        print("条件に合う銘柄はありませんでした。")
+        print("シグナルなし")
