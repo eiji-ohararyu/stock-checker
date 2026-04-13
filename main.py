@@ -110,7 +110,7 @@ def get_stock_data():
     return [x[1] for x in top_up], [x[1] for x in top_down]
 
 def notify_line(message):
-    url = "https://api.line.me/v2/bot/message/push"
+    url = "[https://api.line.me/v2/bot/message/push](https://api.line.me/v2/bot/message/push)"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
     body = {"to": USER_ID, "messages": [{"type": "text", "text": message}]}
     requests.post(url, headers=headers, json=body)
@@ -125,7 +125,7 @@ if __name__ == "__main__":
         msg += "【総合評価：下落警戒TOP10】\n\n" + "\n\n".join(down)
     
     if msg:
-        msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate"
+        msg += "\n\n───────────────\n詳細確認（SBI証券）:\n[https://www.sbisec.co.jp/ETGate](https://www.sbisec.co.jp/ETGate)"
         notify_line(msg)
     else:
         print("シグナルなし")
