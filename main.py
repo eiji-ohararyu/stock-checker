@@ -40,7 +40,7 @@ def calculate_score(df, info):
     # ② ボリンジャーバンド (15点)
     if curr['Close'] > curr['BBL'] and prev['Close'] <= prev['BBL']:
         up_score += 15; up_details.append("BB下限反発(+15)")
-    elif curr['Close'] < curr['BBU'] and prev['Close'] >= prev['BBU']:
+    elif curr['Close'] < curr['BBU'] and prev['Close'] >= curr['BBU']:
         down_score += 15; down_details.append("BB上限反落(+15)")
 
     # ③ RSI (15点)
@@ -103,8 +103,8 @@ def get_stock_data():
         if len(group) < 25: continue
         info = name_map.get(code, {"CompanyName": "不明", "Sector17CodeName": "-"})
         u_score, u_msg, d_score, d_msg = calculate_score(group.copy(), info)
-        if u_score >= 45: up_list.append((u_score, f"{code} {u_msg}"))
-        if d_score >= 45: down_list.append((d_score, f"{code} {d_msg}"))
+        if u_score >= 30: up_list.append((u_score, f"{code} {u_msg}"))
+        if d_score >= 30: down_list.append((d_score, f"{code} {d_msg}"))
 
     top_up = sorted(up_list, key=lambda x: x[0], reverse=True)[:10]
     top_down = sorted(down_list, key=lambda x: x[0], reverse=True)[:10]
