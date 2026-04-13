@@ -9,21 +9,19 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # RSI: 指標ライブラリを使わず自前で計算
     diff = df['Close'].diff()
     up = diff.clip(lower=0)
     down = -diff.clip(upper=0)
     ma_up = up.rolling(window=14).mean()
     ma_down = down.rolling(window=14).mean()
     df['RSI'] = ma_up / (ma_up + ma_down) * 100
-    # Bollinger Bands: 標準偏差を使って自前で計算
     df['BBM'] = df['Close'].rolling(window=20).mean()
     df['std'] = df['Close'].rolling(window=20).std()
     df['BBU'] = df['BBM'] + (df['std'] * 2)
     df['BBL'] = df['BBM'] - (df['std'] * 2)
     return df
 
-def calculate_score(df, info):
+def calculate_score(df, company_name):
     df = calculate_indicators(df)
     if len(df) < 2: return 0, "", 0, ""
     prev, curr = df.iloc[-2], df.iloc[-1]
@@ -50,28 +48,27 @@ def calculate_score(df, info):
         elif curr['RSI'] < prev['RSI'] and prev['RSI'] > 65:
             d_s += 15; d_d.append("RSI反落(+15)")
 
-    # ④ 騰落率/勢い (15点)
+    # ④ 騰落率 (15点)
     chg = ((curr['Close'] - prev['Close']) / prev['Close']) * 100
     if chg > 3: u_s += 15; u_d.append(f"急騰(+15)")
     elif chg < -3: d_s += 15; d_d.append(f"急落(+15)")
 
-    # ⑤ 出来高増加/注目度 (20点)
+    # ⑤ 出来高増加 (20点)
     if curr['Volume'] > curr['vol_avg'] * 2:
         u_s += 20; d_s += 20; u_d.append("爆量(+20)"); d_d.append("爆量(+20)")
 
-    # ⑥ 出来高維持/注目度 (5点)
+    # ⑥ 出来高維持 (5点)
     if curr['Volume'] > prev['Volume']:
         u_s += 5; d_s += 5
 
-    # ⑦ 25日線傾き/トレンド (10点)
+    # ⑦ 25日線傾き (10点)
     if curr['ma25'] > prev['ma25']:
         u_s += 10; u_d.append("25線上向(+10)")
     else:
         d_s += 10; d_d.append("25線下向(+10)")
 
-    name = info.get("CompanyName", "不明")
-    u_m = f"{name}\n{curr['Close']}円 【{u_s}点】\n" + "・".join(u_d)
-    d_m = f"{name}\n{curr['Close']}円 【{d_s}点】\n" + "・".join(d_d)
+    u_m = f"{company_name}\n{curr['Close']}円 【{u_s}点】\n" + "・".join(u_d)
+    d_m = f"{company_name}\n{curr['Close']}円 【{d_s}点】\n" + "・".join(d_d)
     return u_s, u_m, d_s, d_m
 
 def get_stock_data():
@@ -79,20 +76,28 @@ def get_stock_data():
     try:
         r_auth = requests.post(f"https://{host}/v1/token/auth_refresh", params={"refreshtoken": REFRESH_TOKEN})
         token = r_auth.json().get('idToken')
+        if not token: return "認証トークンが取得できませんでした", []
         headers = {"Authorization": f"Bearer {token}"}
         
+        # 銘柄情報の取得
         r_info = requests.get(f"https://{host}/v1/listed/info", headers=headers)
-        name_map = pd.DataFrame(r_info.json()["info"]).set_index('Code')[['CompanyName']].to_dict('index')
+        info_json = r_info.json()
+        name_map = {}
+        if "info" in info_json:
+            name_map = pd.DataFrame(info_json["info"]).set_index('Code')[['CompanyName']].to_dict('index')
 
+        # 株価データの取得
         r_quote = requests.get(f"https://{host}/v1/prices/daily_quotes", headers=headers)
-        quotes = r_quote.json().get("daily_quotes", [])
+        quote_json = r_quote.json()
+        if "daily_quotes" not in quote_json:
+            return f"株価データが見つかりません(API応答: {r_quote.status_code})", []
         
+        quotes = quote_json["daily_quotes"]
         if not quotes:
-            return "取得した株価データが空です。APIの更新を待つか、17時半以降に再試行してください。", []
+            return "取得した株価データが空です", []
 
         df = pd.DataFrame(quotes)
         df = df.sort_values(['Code', 'Date'])
-        # 数値型へ変換
         df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
         df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
         df['ma5'] = df.groupby('Code')['Close'].transform(lambda x: x.rolling(5).mean())
@@ -102,7 +107,8 @@ def get_stock_data():
         u_l, d_l = [], []
         for code, group in df.groupby('Code'):
             if len(group) < 25: continue
-            u_s, u_m, d_s, d_m = calculate_score(group.copy(), name_map.get(code, {}))
+            name = name_map.get(code, {}).get("CompanyName", f"コード:{code}")
+            u_s, u_m, d_s, d_m = calculate_score(group.copy(), name)
             u_l.append((u_s, f"{code} {u_m}"))
             d_l.append((d_s, f"{code} {d_m}"))
 
@@ -110,7 +116,7 @@ def get_stock_data():
         top_d = [x[1] for x in sorted(d_l, key=lambda x: x[0], reverse=True)[:10]]
         return None, (top_u, top_d)
     except Exception as e:
-        return f"エラー: {str(e)}", []
+        return f"システムエラー: {str(e)}", []
 
 def notify_line(msg):
     url = "https://api.line.me/v2/bot/message/push"
