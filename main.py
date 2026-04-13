@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 
-# Secrets（前後の空白を削除）
+# Secretsの取得
 REFRESH_TOKEN = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
@@ -38,9 +38,9 @@ def calculate_score(df, company_name):
         d_s += 15; d_d.append("BB反落(+15)")
     if not np.isnan(curr['RSI']):
         if curr['RSI'] > prev['RSI'] and prev['RSI'] < 35:
-            u_s += 15; u_d.append("RSI底打ち(+15)")
+            u_s += 15; u_d.append("RSI底(+15)")
         elif curr['RSI'] < prev['RSI'] and prev['RSI'] > 65:
-            d_s += 15; d_d.append("RSI天井打ち(+15)")
+            d_s += 15; d_d.append("RSI天(+15)")
     if ((curr['Close'] - prev['Close']) / prev['Close']) * 100 > 3:
         u_s += 15; u_d.append("急騰(+15)")
     elif ((curr['Close'] - prev['Close']) / prev['Close']) * 100 < -3:
@@ -48,10 +48,8 @@ def calculate_score(df, company_name):
     if curr['Volume'] > curr['vol_avg'] * 2:
         u_s += 20; d_s += 20; u_d.append("爆量(+20)"); d_d.append("爆量(+20)")
     if curr['Volume'] > prev['Volume']: u_s += 5; d_s += 5
-    if curr['ma25'] > prev['ma25']:
-        u_s += 10; u_d.append("25線上向(+10)")
-    else:
-        d_s += 10; d_d.append("25線下向(+10)")
+    if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25線上向(+10)")
+    else: d_s += 10; d_d.append("25線下向(+10)")
 
     u_m = f"{company_name}\n{curr['Close']}円 【{u_s}点】\n" + "・".join(u_d)
     d_m = f"{company_name}\n{curr['Close']}円 【{d_s}点】\n" + "・".join(d_d)
@@ -60,10 +58,9 @@ def calculate_score(df, company_name):
 def get_stock_data():
     host = "api.jquants.com"
     try:
-        # トークン更新（ここで成功すれば延命される）
         r_auth = requests.post(f"https://{host}/v1/token/auth_refresh", params={"refreshtoken": REFRESH_TOKEN})
         if r_auth.status_code != 200:
-            return f"認証失敗: {r_auth.text}", []
+            return f"認証失敗({r_auth.status_code}): {r_auth.text}", []
         
         token = r_auth.json().get('idToken')
         headers = {"Authorization": f"Bearer {token}"}
@@ -73,7 +70,7 @@ def get_stock_data():
 
         r_quote = requests.get(f"https://{host}/v1/prices/daily_quotes", headers=headers)
         quotes = r_quote.json().get("daily_quotes", [])
-        if not quotes: return "データ更新待ちです", []
+        if not quotes: return "API側データ更新待ち", []
 
         df = pd.DataFrame(quotes)
         df = df.sort_values(['Code', 'Date'])
@@ -95,7 +92,7 @@ def get_stock_data():
         top_d = [x[1] for x in sorted(d_l, key=lambda x: x[0], reverse=True)[:10]]
         return None, (top_u, top_d)
     except Exception as e:
-        return f"エラー: {str(e)}", []
+        return f"実行エラー: {str(e)}", []
 
 def notify_line(msg):
     url = "https://api.line.me/v2/bot/message/push"
@@ -109,5 +106,6 @@ if __name__ == "__main__":
         notify_line(f"⚠️ {err}")
     elif results:
         u, d = results
-        msg = "【上昇期待TOP10】\n\n" + "\n\n".join(u) + "\n\n───────────────\n\n【下落警戒TOP10】\n\n" + "\n\n".join(d)
-        notify_line(msg)
+        if u or d:
+            msg = "【上昇期待TOP10】\n\n" + "\n\n".join(u) + "\n\n───────────────\n\n【下落警戒TOP10】\n\n" + "\n\n".join(d)
+            notify_line(msg)
