@@ -1,7 +1,7 @@
 name: Daily Stock Check
 on:
   schedule:
-    - cron: '30 8 * * 1-5' # 日本時間17:30
+    - cron: '30 8 * * 1-5' # 日本時間 17:30
   workflow_dispatch:
 jobs:
   build:
