@@ -91,30 +91,24 @@ def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     
-    # 1. 銘柄情報の取得 (V2の全件取得対応版)
+    # 1. 銘柄情報の取得 (V2 /equities/info を使用)
     name_map = {}
-    info_path = "/listed/info" # V2 master系
     try:
-        r_info = requests.get(host + info_path, headers=headers)
-        if r_info.status_code != 200:
-            r_info = requests.get(host + "/equities/info", headers=headers)
-            
+        r_info = requests.get(f"{host}/equities/info", headers=headers)
         if r_info.status_code == 200:
-            info_data = r_info.json().get("data", [])
-            for item in info_data:
-                # どんなキー名でもいいように小文字化してマッチング
-                low_item = {k.lower(): v for k, v in item.items()}
-                raw_code = str(low_item.get("code", ""))
+            for item in r_info.json().get("data", []):
+                # V2はキー名が先頭大文字
+                raw_code = str(item.get("Code", ""))
                 code = raw_code[:4]
                 if code:
                     name_map[code] = {
-                        "name": low_item.get("companyname") or low_item.get("company_name") or "不明",
-                        "sector": low_item.get("sector17codename") or low_item.get("sector17_code_name") or "-"
+                        "name": item.get("CompanyName", "不明"),
+                        "sector": item.get("Sector17CodeName", "-")
                     }
     except:
         pass
 
-    # 2. 過去データの収集 (取得日数ログ用)
+    # 2. 過去データの収集
     all_data = []
     success_days = 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -139,9 +133,11 @@ def get_stock_data():
         info = name_map.get(short_code, {"name": "不明", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
         
-        if u_s >= 40: up_list.append((u_s, f"{short_code} {u_m}"))
-        if d_s >= 40: down_list.append((d_s, f"{short_code} {d_m}"))
+        # 点数が付いているものはすべてリストに追加
+        if u_s > 0: up_list.append((u_s, f"{short_code} {u_m}"))
+        if d_s > 0: down_list.append((d_s, f"{short_code} {d_m}"))
 
+    # スコア順に上位10件を抽出
     top_u = [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]]
     top_d = [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:10]]
     return report, top_u, top_d
