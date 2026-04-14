@@ -11,8 +11,10 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    df['close'] = pd.to_numeric(df['C'], errors='coerce')
+    # 分割対応のため「AdjustmentClose(調整後終値)」を優先使用
+    df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
+    
     diff = df['close'].diff()
     up, down = diff.clip(lower=0), -diff.clip(upper=0)
     df['rsi'] = up.rolling(14).mean() / (up.rolling(14).mean() + down.rolling(14).mean()) * 100
@@ -37,16 +39,20 @@ def calculate_score(df, info, short_code):
     if not np.isnan(curr['rsi']):
         if curr['rsi'] > prev['rsi'] and prev['rsi'] < 35: u_s += 15; u_d.append("RSI底打ち(+15)")
         elif curr['rsi'] < prev['rsi'] and prev['rsi'] > 65: d_s += 15; d_d.append("RSI天井打ち(+15)")
+    
     change = ((curr['close'] - prev['close']) / prev['close']) * 100 if prev['close'] > 0 else 0
     if change > 3: u_s += 15; u_d.append(f"急騰 {change:.1f}%(+15)")
     elif change < -3: d_s += 15; d_d.append(f"急落 {change:.1f}%(+15)")
+    
     if curr['vol_avg'] > 0 and (curr['volume'] / curr['vol_avg']) > 2:
         u_s += 20; d_s += 20; u_d.append("出来高2倍超(+20)"); d_d.append("出来高2倍超(+20)")
     if curr['volume'] > prev['volume']: u_s += 5; d_s += 5
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
-    header = f"{short_code} {info['name']} ({info['sector']})\n{curr['close']}円"
+    # 実際の現在値(C)を表示
+    raw_close = pd.to_numeric(curr['C'], errors='coerce')
+    header = f"{short_code} {info['name']} ({info['sector']})\n{raw_close}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
@@ -54,26 +60,24 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 東証CSVの読み込みを修正
+    # 銘柄名マッチングの強化版
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url)
         res.encoding = 'shift_jis'
-        # 銘柄名や業種を確実に取得するため、ヘッダーを自動認識させてから空白を除去
         csv_df = pd.read_csv(io.StringIO(res.text))
-        csv_df.columns = csv_df.columns.str.strip() # 列名の空白削除
+        csv_df.columns = csv_df.columns.str.strip()
         
         for _, row in csv_df.iterrows():
-            # コード列から4桁を抽出（数値や文字列のゆらぎに対応）
+            # スペース等を除去して4桁を抽出
             raw_code = str(row['コード']).strip()
             code = raw_code[:4]
-            if code.isdigit() or (len(code) == 4 and code[3].isalpha()):
+            if code:
                 name_map[code] = {
                     "name": str(row['銘柄名']).strip(),
                     "sector": str(row['17業種区分']).strip()
                 }
-    except Exception as e:
-        print(f"CSV Error: {e}")
+    except: pass
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -91,8 +95,7 @@ def get_stock_data():
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
         short_code = str(code)[:4]
-        # name_mapから引く。見つからない場合のみ「新規上場等」
-        info = name_map.get(short_code, {"name": "新規上場等", "sector": "-"})
+        info = name_map.get(short_code, {"name": "不明", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, short_code)
         if u_s > 0: up_list.append((u_s, u_m))
         if d_s > 0: down_list.append((d_s, d_m))
