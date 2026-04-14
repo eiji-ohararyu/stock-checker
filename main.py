@@ -11,7 +11,7 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # 分割対応のため「AdjustmentClose(調整後終値)」を優先使用
+    # 分割対応：調整後終値(AdjustmentClose)を優先。なければ終値(C)
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     
@@ -25,7 +25,7 @@ def calculate_indicators(df):
     df['vol_avg'] = df['volume'].rolling(5).mean()
     return df
 
-def calculate_score(df, info, short_code):
+def calculate_score(df, info, code_str):
     df = calculate_indicators(df)
     if len(df) < 2: return 0, "", 0, ""
     prev, curr = df.iloc[-2], df.iloc[-1]
@@ -50,17 +50,20 @@ def calculate_score(df, info, short_code):
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
-    # 実際の現在値(C)を表示
-    raw_close = pd.to_numeric(curr['C'], errors='coerce')
-    header = f"{short_code} {info['name']} ({info['sector']})\n{raw_close}円"
-    return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
+    # 証券番号が重複しないようにheaderを構成
+    raw_price = pd.to_numeric(curr['C'], errors='coerce')
+    header = f"{code_str} {info['name']} ({info['sector']})\n{raw_price}円"
+    
+    u_msg = f"{header} 【{u_s}点】\n" + "・".join(u_d)
+    d_msg = f"{header} 【{d_s}点】\n" + "・".join(d_d)
+    return u_s, u_msg, d_s, d_msg
 
 def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 銘柄名マッチングの強化版
+    # 東証CSVを直接読み込んで名簿作成
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url)
@@ -69,11 +72,9 @@ def get_stock_data():
         csv_df.columns = csv_df.columns.str.strip()
         
         for _, row in csv_df.iterrows():
-            # スペース等を除去して4桁を抽出
-            raw_code = str(row['コード']).strip()
-            code = raw_code[:4]
-            if code:
-                name_map[code] = {
+            code_val = str(row['コード']).strip()[:4]
+            if code_val:
+                name_map[code_val] = {
                     "name": str(row['銘柄名']).strip(),
                     "sector": str(row['17業種区分']).strip()
                 }
@@ -92,15 +93,20 @@ def get_stock_data():
     if not all_data: return "0", [], []
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
     up_list, down_list = [], []
+    
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
         short_code = str(code)[:4]
+        # 名簿から引く、なければ「不明」
         info = name_map.get(short_code, {"name": "不明", "sector": "-"})
-        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, short_code)
-        if u_s > 0: up_list.append((u_s, u_m))
-        if d_s > 0: down_list.append((d_s, d_m))
+        u_s, u_msg, d_s, d_msg = calculate_score(group.copy(), info, short_code)
+        
+        if u_s > 0: up_list.append((u_s, u_msg))
+        if d_s > 0: down_list.append((d_s, d_msg))
 
-    return str(success_days), [x[1] for x in sorted(up_list, reverse=True)[:10]], [x[1] for x in sorted(down_list, reverse=True)[:10]]
+    top_u = [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]]
+    top_d = [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:10]]
+    return str(success_days), top_u, top_d
 
 def notify_line(msg):
     requests.post("https://api.line.me/v2/bot/message/push", 
