@@ -53,10 +53,13 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     try:
-        r_info = requests.get(f"{host}/equities/info", headers=headers)
+        # より網羅的な銘柄台帳APIを使用
+        r_info = requests.get(f"{host}/listed/info", headers=headers)
         if r_info.status_code == 200:
-            for item in r_info.json().get("data", []):
-                # コードを4桁文字列にして確実に紐付ける
+            # V2のlisted/infoは "info" または "data" キーで返るため両方対応
+            res_json = r_info.json()
+            items = res_json.get("info") or res_json.get("data") or []
+            for item in items:
                 c = str(item.get("Code", ""))[:4]
                 if c:
                     name_map[c] = {
@@ -81,7 +84,6 @@ def get_stock_data():
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
         short_code = str(code)[:4]
-        # 辞書引きに失敗してもコードだけは出すように対策
         info = name_map.get(short_code, {"name": f"不明({short_code})", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
         if u_s > 0: up_list.append((u_s, f"{short_code} {u_m}"))
@@ -103,4 +105,5 @@ if __name__ == "__main__":
         msg += "\n\n───────────────\n\n【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
     
     if up or down:
+        msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate/?_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&burl=iris_top&cat1=market&cat2=top&dir=tl1-top%7Ctl2-map%7Ctl5-jpn&file=index.html&getFlg=on&OutSide=on"
         notify_line(msg)
