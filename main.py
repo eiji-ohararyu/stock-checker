@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import io
 
 # Secrets
 API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
@@ -53,22 +54,15 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 【超強化】銘柄名取得セクション
+    # 解決策：東証公式のマスターCSVを直接読み込む
     try:
-        r_info = requests.get(f"{host}/listed/info", headers=headers)
-        if r_info.status_code == 200:
-            res_json = r_info.json()
-            # 可能性のあるキーすべてを順番にチェック
-            items = res_json.get("info") or res_json.get("data") or res_json.get("listed_info") or []
-            for item in items:
-                # すべてのキーを小文字化した辞書を作って、ゆらぎを吸収
-                low_item = {k.lower(): v for k, v in item.items()}
-                c = str(low_item.get("code", ""))[:4]
-                if c:
-                    # 名前とセクターも複数パターンのキー名で試行
-                    name = low_item.get("companyname") or low_item.get("company_name") or "不明"
-                    sector = low_item.get("sector17codename") or low_item.get("sector17_code_name") or "-"
-                    name_map[c] = {"name": name, "sector": sector}
+        csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
+        res = requests.get(csv_url)
+        res.encoding = 'shift_jis'
+        csv_df = pd.read_csv(io.StringIO(res.text))
+        for _, row in csv_df.iterrows():
+            code = str(row['コード'])[:4]
+            name_map[code] = {"name": row['銘柄名'], "sector": row['17業種区分']}
     except: pass
 
     all_data, success_days = [], 0
@@ -77,9 +71,7 @@ def get_stock_data():
         r = requests.get(f"{host}/equities/bars/daily", headers=headers, params={"date": d})
         if r.status_code == 200:
             day_data = r.json().get("data", [])
-            if day_data:
-                all_data.extend(day_data)
-                success_days += 1
+            if day_data: all_data.extend(day_data); success_days += 1
     
     if not all_data: return "0", [], []
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
@@ -87,7 +79,8 @@ def get_stock_data():
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
         short_code = str(code)[:4]
-        info = name_map.get(short_code, {"name": f"不明({short_code})", "sector": "-"})
+        # 重複表示を避けるため、ここでは銘柄名のみ取得
+        info = name_map.get(short_code, {"name": "新規上場等", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
         if u_s > 0: up_list.append((u_s, f"{short_code} {u_m}"))
         if d_s > 0: down_list.append((d_s, f"{short_code} {d_m}"))
