@@ -10,7 +10,6 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # V2のキー (C:終値, Vo:出来高) を使用
     df['close'] = pd.to_numeric(df['C'], errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     
@@ -27,7 +26,7 @@ def calculate_indicators(df):
     df['bbu'] = df['bbm'] + (df['std'] * 2)
     df['bbl'] = df['bbm'] - (df['std'] * 2)
     
-    # 移動平均と出来高平均
+    # 移動平均
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma25'] = df['close'].rolling(25).mean()
     df['vol_avg'] = df['volume'].rolling(5).mean()
@@ -47,7 +46,7 @@ def calculate_score(df, info):
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']:
         d_s += 20; d_d.append("DC発生(+20)")
 
-    # ② ボリンジャーバンド (15)
+    # ② BB (15)
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']:
         u_s += 15; u_d.append("BB下限反発(+15)")
     elif curr['close'] < curr['bbu'] and prev['close'] >= curr['bbu']:
@@ -76,7 +75,7 @@ def calculate_score(df, info):
     if curr['volume'] > prev['volume']:
         u_s += 5; d_s += 5
 
-    # ⑦ 25日線の傾き (10)
+    # ⑦ 25日線 (10)
     if curr['ma25'] > prev['ma25']:
         u_s += 10; u_d.append("25日線上向き(+10)")
     else:
@@ -92,17 +91,21 @@ def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     
-    # 1. 銘柄情報
+    # 1. 銘柄情報の取得とマッピングの修正
     name_map = {}
     r_info = requests.get(f"{host}/listed/info", headers=headers)
     if r_info.status_code == 200:
         for item in r_info.json().get("data", []):
-            name_map[str(item.get("Code"))[:4]] = {
-                "name": item.get("CompanyName", "不明"),
-                "sector": item.get("Sector17CodeName", "-")
+            # キー名を小文字化して取得漏れを防ぐ
+            item_low = {k.lower(): v for k, v in item.items()}
+            code = str(item_low.get("code", ""))
+            if len(code) > 4: code = code[:4]
+            name_map[code] = {
+                "name": item_low.get("companyname") or item_low.get("company_name") or "不明",
+                "sector": item_low.get("sector17codename") or item_low.get("sector17_code_name") or "-"
             }
 
-    # 2. 過去35日分のデータを収集
+    # 2. 過去35日分の収集
     all_data = []
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
     for d in reversed(dates):
@@ -112,12 +115,12 @@ def get_stock_data():
     
     if not all_data: return [], []
 
-    # 3. 集計と判定
+    # 3. 集計
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
     up_list, down_list = [], []
     
     for code, group in df.groupby('Code'):
-        if len(group) < 2: continue
+        if len(group) < 10: continue
         short_code = str(code)[:4]
         info = name_map.get(short_code, {"name": "不明", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
