@@ -46,7 +46,8 @@ def calculate_score(df, info):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     header = f"{info['name']} ({info['sector']})\n{curr['close']}円"
-    return u_s, f"{header} 【{u_s}点】\n" + "\n".join([f"・{d}" for d in u_d]), d_s, f"{header} 【{d_s}点】\n" + "\n".join([f"・{d}" for d in d_d])
+    # 内訳を一行にまとめる
+    return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
     host = "https://api.jquants.com/v2"
