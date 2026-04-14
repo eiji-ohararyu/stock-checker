@@ -52,20 +52,23 @@ def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     name_map = {}
+    
+    # 【超強化】銘柄名取得セクション
     try:
-        # より網羅的な銘柄台帳APIを使用
         r_info = requests.get(f"{host}/listed/info", headers=headers)
         if r_info.status_code == 200:
-            # V2のlisted/infoは "info" または "data" キーで返るため両方対応
             res_json = r_info.json()
-            items = res_json.get("info") or res_json.get("data") or []
+            # 可能性のあるキーすべてを順番にチェック
+            items = res_json.get("info") or res_json.get("data") or res_json.get("listed_info") or []
             for item in items:
-                c = str(item.get("Code", ""))[:4]
+                # すべてのキーを小文字化した辞書を作って、ゆらぎを吸収
+                low_item = {k.lower(): v for k, v in item.items()}
+                c = str(low_item.get("code", ""))[:4]
                 if c:
-                    name_map[c] = {
-                        "name": item.get("CompanyName", "不明"),
-                        "sector": item.get("Sector17CodeName", "-")
-                    }
+                    # 名前とセクターも複数パターンのキー名で試行
+                    name = low_item.get("companyname") or low_item.get("company_name") or "不明"
+                    sector = low_item.get("sector17codename") or low_item.get("sector17_code_name") or "-"
+                    name_map[c] = {"name": name, "sector": sector}
     except: pass
 
     all_data, success_days = [], 0
