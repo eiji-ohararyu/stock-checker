@@ -1,17 +1,24 @@
-name: Daily Stock Check
+name: J-Quants Stock Scanner
+
 on:
   schedule:
-    - cron: '30 8 * * 1-5'
-  workflow_dispatch:
+    # 日本時間 16:00 (UTC 7:00) に実行
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch: # 手動実行ボタン用
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-      - run: pip install requests pandas numpy
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy
       - name: Run script
         env:
           JQUANTS_REFRESH_TOKEN: ${{ secrets.JQUANTS_REFRESH_TOKEN }}
