@@ -9,7 +9,6 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # V2のレスポンス（小文字）に合わせて計算
     diff = df['close'].diff()
     up = diff.clip(lower=0)
     down = -diff.clip(upper=0)
@@ -29,32 +28,25 @@ def calculate_score(df, company_name):
     u_s, d_s = 0, 0
     u_d, d_d = [] , []
 
-    # ① GC/DC (20)
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']:
         u_s += 20; u_d.append("GC(+20)")
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']:
         d_s += 20; d_d.append("DC(+20)")
-    # ② BB (15)
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']:
         u_s += 15; u_d.append("BB反発(+15)")
     elif curr['close'] < curr['bbu'] and prev['close'] >= curr['bbu']:
         d_s += 15; d_d.append("BB反落(+15)")
-    # ③ RSI (15)
     if not np.isnan(curr['rsi']):
         if curr['rsi'] > prev['rsi'] and prev['rsi'] < 35:
             u_s += 15; u_d.append("RSI底(+15)")
         elif curr['rsi'] < prev['rsi'] and prev['rsi'] > 65:
             d_s += 15; d_d.append("RSI天(+15)")
-    # ④ 騰落率 (15)
-    chg = ((curr['close'] - prev['close']) / prev['close']) * 100
-    if chg > 3:
+    if ((curr['close'] - prev['close']) / prev['close']) * 100 > 3:
         u_s += 15; u_d.append("急騰(+15)")
-    elif chg < -3:
+    elif ((curr['close'] - prev['close']) / prev['close']) * 100 < -3:
         d_s += 15; d_d.append("急落(+15)")
-    # ⑤ 出来高 (20)
     if curr['volume'] > curr['vol_avg'] * 2:
         u_s += 20; d_s += 20; u_d.append("爆量(+20)")
-    # ⑦ 25日線 (10)
     if curr['ma25'] > prev['ma25']:
         u_s += 10; u_d.append("25線上向(+10)")
     else:
@@ -69,30 +61,37 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     
     try:
-        # 1. 銘柄情報取得
-        r_info = requests.get(f"{host}/equities/info", headers=headers)
+        # 1. 銘柄情報取得 (パスをシンプルに修正)
+        r_info = requests.get(f"{host}/listed/info", headers=headers)
+        if r_info.status_code != 200:
+            # 再度エラーなら equities を挟む旧パスを試す
+            r_info = requests.get(f"{host}/equities/info", headers=headers)
+            
         if r_info.status_code != 200:
             return f"V2認証失敗({r_info.status_code}): {r_info.text}", []
         
-        name_map = pd.DataFrame(r_info.json()["info"]).set_index('code')[['company_name']].to_dict('index')
+        info_data = r_info.json().get("info") or r_info.json().get("listed_info")
+        name_map = pd.DataFrame(info_data).set_index('code')[['company_name']].to_dict('index')
 
-        # 2. 株価データ取得 (画像通りのエンドポイント)
-        r_quote = requests.get(f"{host}/equities/bars/daily", headers=headers)
+        # 2. 株価データ取得 (画像ファイル名に基づき prices/daily_quotes を使用)
+        r_quote = requests.get(f"{host}/prices/daily_quotes", headers=headers)
         if r_quote.status_code != 200:
-            return f"V2データ取得失敗({r_quote.status_code}): {r_quote.text}", []
+            # 失敗時は bars/daily を試す
+            r_quote = requests.get(f"{host}/equities/bars/daily", headers=headers)
             
-        # 3. レスポンスは 'bars' キーで受け取る
-        quotes = r_quote.json().get("bars", [])
+        if r_quote.status_code != 200:
+            return f"V2取得失敗({r_quote.status_code}): {r_quote.text}", []
+            
+        data = r_quote.json()
+        quotes = data.get("daily_quotes") or data.get("bars")
         if not quotes:
-            return "データが配信されていません", []
+            return "データなし", []
 
         df = pd.DataFrame(quotes)
-        # V2のカラム名（小文字）を処理
         df['close'] = pd.to_numeric(df['close'], errors='coerce')
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
         df = df.sort_values(['code', 'date'])
 
-        # 指標計算用の前処理
         df['ma5'] = df.groupby('code')['close'].transform(lambda x: x.rolling(5).mean())
         df['ma25'] = df.groupby('code')['close'].transform(lambda x: x.rolling(25).mean())
         df['vol_avg'] = df.groupby('code')['volume'].transform(lambda x: x.rolling(5).mean())
