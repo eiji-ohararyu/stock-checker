@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import io
 
 # Secrets
 API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
@@ -52,17 +53,19 @@ def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     name_map = {}
+    
+    # 外部(J-Quants公式)から最新の銘柄リストCSVを取得
     try:
-        r_info = requests.get(f"{host}/equities/info", headers=headers)
+        r_info = requests.get(f"{host}/listed/info", headers=headers)
         if r_info.status_code == 200:
             for item in r_info.json().get("data", []):
-                # どんなコード形式が来ても4桁に変換して突合させる
-                raw_code = str(item.get("Code", ""))
-                code = raw_code[:4]
+                # キー名を小文字にして安全に取得
+                low_item = {k.lower(): v for k, v in item.items()}
+                code = str(low_item.get("code", ""))[:4]
                 if code:
                     name_map[code] = {
-                        "name": item.get("CompanyName", "不明"),
-                        "sector": item.get("Sector17CodeName", "-")
+                        "name": low_item.get("companyname") or low_item.get("company_name") or "不明",
+                        "sector": low_item.get("sector17codename") or low_item.get("sector17_code_name") or "-"
                     }
     except: pass
 
@@ -79,7 +82,6 @@ def get_stock_data():
     up_list, down_list = [], []
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        # 取得した株価コード(5桁の場合あり)を4桁にして辞書から引く
         short_code = str(code)[:4]
         info = name_map.get(short_code, {"name": "不明", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
@@ -96,10 +98,10 @@ def notify_line(msg):
 if __name__ == "__main__":
     up, down = get_stock_data()
     msg = ""
-    if up: msg += "【総合評価：上昇期待TOP10】\n\n" + "\n\n".join(up)
+    if up: msg += "【上昇期待TOP10】\n\n" + "\n\n".join(up)
     if down:
         if msg: msg += "\n\n" + "───────────────" + "\n\n"
-        msg += "【総合評価：下落警戒TOP10】\n\n" + "\n\n".join(down)
+        msg += "【下落警戒TOP10】\n\n" + "\n\n".join(down)
     if msg:
         msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate"
         notify_line(msg)
