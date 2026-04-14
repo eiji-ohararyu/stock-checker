@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import io
 
 # Secrets
 API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
@@ -47,37 +46,34 @@ def calculate_score(df, info):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     header = f"{info['name']} ({info['sector']})\n{curr['close']}円"
-    return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
+    return u_s, f"{header} 【{u_s}点】\n" + "\n".join([f"・{d}" for d in u_d]), d_s, f"{header} 【{d_s}点】\n" + "\n".join([f"・{d}" for d in d_d])
 
 def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     name_map = {}
-    
-    # 外部(J-Quants公式)から最新の銘柄リストCSVを取得
     try:
-        r_info = requests.get(f"{host}/listed/info", headers=headers)
+        r_info = requests.get(f"{host}/equities/info", headers=headers)
         if r_info.status_code == 200:
             for item in r_info.json().get("data", []):
-                # キー名を小文字にして安全に取得
-                low_item = {k.lower(): v for k, v in item.items()}
-                code = str(low_item.get("code", ""))[:4]
-                if code:
-                    name_map[code] = {
-                        "name": low_item.get("companyname") or low_item.get("company_name") or "不明",
-                        "sector": low_item.get("sector17codename") or low_item.get("sector17_code_name") or "-"
-                    }
+                code = str(item.get("Code", ""))[:4]
+                name_map[code] = {
+                    "name": item.get("CompanyName", "不明"),
+                    "sector": item.get("Sector17CodeName", "-")
+                }
     except: pass
 
-    all_data = []
+    all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
     for d in reversed(dates):
         r = requests.get(f"{host}/equities/bars/daily", headers=headers, params={"date": d})
         if r.status_code == 200:
             day_data = r.json().get("data", [])
-            if day_data: all_data.extend(day_data)
+            if day_data:
+                all_data.extend(day_data)
+                success_days += 1
     
-    if not all_data: return [], []
+    if not all_data: return "0", [], []
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
     up_list, down_list = [], []
     for code, group in df.groupby('Code'):
@@ -88,7 +84,7 @@ def get_stock_data():
         if u_s > 0: up_list.append((u_s, f"{short_code} {u_m}"))
         if d_s > 0: down_list.append((d_s, f"{short_code} {d_m}"))
 
-    return [x[1] for x in sorted(up_list, reverse=True)[:10]], [x[1] for x in sorted(down_list, reverse=True)[:10]]
+    return str(success_days), [x[1] for x in sorted(up_list, reverse=True)[:10]], [x[1] for x in sorted(down_list, reverse=True)[:10]]
 
 def notify_line(msg):
     requests.post("https://api.line.me/v2/bot/message/push", 
@@ -96,12 +92,12 @@ def notify_line(msg):
                   json={"to": USER_ID, "messages": [{"type": "text", "text": msg[:5000]}]})
 
 if __name__ == "__main__":
-    up, down = get_stock_data()
-    msg = ""
-    if up: msg += "【上昇期待TOP10】\n\n" + "\n\n".join(up)
+    day_count, up, down = get_stock_data()
+    today = datetime.now().strftime("%Y.%m.%d")
+    msg = f"{today}　株価評価レポート\n（データ取得日数：{day_count}）\n\n"
+    if up: msg += "【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(up)
     if down:
-        if msg: msg += "\n\n" + "───────────────" + "\n\n"
-        msg += "【下落警戒TOP10】\n\n" + "\n\n".join(down)
-    if msg:
-        msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate"
+        msg += "\n\n───────────────\n\n【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
+    if up or down:
+        msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://apps.apple.com/jp/app/sbi%E8%A8%BC%E5%88%B8-%E6%A0%AA-%E3%82%A2%E3%83%97%E3%83%AA-%E6%A0%AA%E4%BE%A1-%E6%8A%95%E8%B3%87%E6%83%85%E5%A0%B1/id1240742779"
         notify_line(msg)
