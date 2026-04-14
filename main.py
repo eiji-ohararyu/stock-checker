@@ -3,12 +3,13 @@ import requests
 import pandas as pd
 import numpy as np
 
-# Secrets（Lightプランではリフレッシュトークンを直接x-api-keyとして使用）
+# Secrets（V2はリフレッシュトークンを x-api-key として直接使う）
 API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
+    # V2のカラム名は小文字
     diff = df['close'].diff()
     up = diff.clip(lower=0)
     down = -diff.clip(upper=0)
@@ -42,9 +43,9 @@ def calculate_score(df, company_name):
     chg = ((curr['close'] - prev['close']) / prev['close']) * 100
     if chg > 3: u_s += 15; u_d.append("急騰(+15)")
     elif chg < -3: d_s += 15; d_d.append("急落(+15)")
-    # ⑤ 出来高増加 (20)
+    # ⑤ 出来高 (20)
     if curr['volume'] > curr['vol_avg'] * 2: u_s += 20; d_s += 20; u_d.append("爆量(+20)")
-    # ⑦ 25日線傾き (10)
+    # ⑦ 25日線 (10)
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25線上向(+10)")
     else: d_s += 10; d_d.append("25線下向(+10)")
 
@@ -53,28 +54,34 @@ def calculate_score(df, company_name):
     return u_s, u_msg, d_s, d_msg
 
 def get_stock_data():
+    # V2の正しいホスト名
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     
     try:
-        # 銘柄情報取得 (V2)
+        # 銘柄情報 (V2)
         r_info = requests.get(f"{host}/equities/info", headers=headers)
         if r_info.status_code != 200:
             return f"V2認証失敗({r_info.status_code}): {r_info.text}", []
         
         name_map = pd.DataFrame(r_info.json()["info"]).set_index('code')[['company_name']].to_dict('index')
 
-        # 当日株価データ取得 (V2)
+        # 日次価格 (V2)
+        # /equities/bars/daily が正しいエンドポイント
         r_quote = requests.get(f"{host}/equities/bars/daily", headers=headers)
+        if r_quote.status_code != 200:
+            return f"V2データ取得失敗({r_quote.status_code}): {r_quote.text}", []
+            
         quotes = r_quote.json().get("bars", [])
-        if not quotes: return "データ更新待ちです", []
+        if not quotes: return "データがまだ配信されていません", []
 
         df = pd.DataFrame(quotes)
-        # V2の小文字カラム名に対応
+        # V2はカラム名がすべて小文字
         df['close'] = pd.to_numeric(df['close'], errors='coerce')
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
         df = df.sort_values(['code', 'date'])
 
+        # 指標計算
         df['ma5'] = df.groupby('code')['close'].transform(lambda x: x.rolling(5).mean())
         df['ma25'] = df.groupby('code')['close'].transform(lambda x: x.rolling(25).mean())
         df['vol_avg'] = df.groupby('code')['volume'].transform(lambda x: x.rolling(5).mean())
@@ -91,7 +98,7 @@ def get_stock_data():
         top_d = [x[1] for x in sorted(d_l, key=lambda x: x[0], reverse=True)[:10]]
         return None, (top_u, top_d)
     except Exception as e:
-        return f"V2エラー: {str(e)}", []
+        return f"V2システムエラー: {str(e)}", []
 
 def notify_line(msg):
     requests.post("https://api.line.me/v2/bot/message/push", 
