@@ -11,7 +11,8 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # 分割対応：調整後終値(AdjustmentClose)を優先。なければ終値(C)
+    # 分割対応：調整後終値(AdjustmentClose)を優先。データがなければ終値(C)を使用
+    # これにより分割時の「窓開け」による誤判定を防ぎます
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     
@@ -32,6 +33,7 @@ def calculate_score(df, info, code_str):
     u_s, d_s = 0, 0
     u_d, d_d = [], []
 
+    # テクニカル判定
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; u_d.append("BB下限反発(+15)")
@@ -50,31 +52,30 @@ def calculate_score(df, info, code_str):
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
-    # 証券番号が重複しないようにheaderを構成
-    raw_price = pd.to_numeric(curr['C'], errors='coerce')
-    header = f"{code_str} {info['name']} ({info['sector']})\n{raw_price}円"
-    
-    u_msg = f"{header} 【{u_s}点】\n" + "・".join(u_d)
-    d_msg = f"{header} 【{d_s}点】\n" + "・".join(d_d)
-    return u_s, u_msg, d_s, d_msg
+    # 出力
+    cur_p = pd.to_numeric(curr['C'], errors='coerce')
+    header = f"{code_str} {info['name']} ({info['sector']})\n{cur_p}円"
+    return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 東証CSVを直接読み込んで名簿作成
+    # 東証マスターCSV取得 (型不一致と空白を徹底排除)
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url)
         res.encoding = 'shift_jis'
+        # 1行目はタイトル等の可能性があるため、スキップ設定や型指定を厳密に行う
         csv_df = pd.read_csv(io.StringIO(res.text))
         csv_df.columns = csv_df.columns.str.strip()
         
         for _, row in csv_df.iterrows():
-            code_val = str(row['コード']).strip()[:4]
-            if code_val:
-                name_map[code_val] = {
+            c_val = str(row['コード']).strip()
+            if len(c_val) >= 4:
+                code_key = c_val[:4]
+                name_map[code_key] = {
                     "name": str(row['銘柄名']).strip(),
                     "sector": str(row['17業種区分']).strip()
                 }
@@ -96,17 +97,16 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        short_code = str(code)[:4]
-        # 名簿から引く、なければ「不明」
-        info = name_map.get(short_code, {"name": "不明", "sector": "-"})
-        u_s, u_msg, d_s, d_msg = calculate_score(group.copy(), info, short_code)
+        # J-Quants側のCodeも確実に4桁の「文字列」に変換して比較
+        s_code = str(code).strip()[:4]
+        info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
         
-        if u_s > 0: up_list.append((u_s, u_msg))
-        if d_s > 0: down_list.append((d_s, d_msg))
+        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code)
+        if u_s > 0: up_list.append((u_s, u_m))
+        if d_s > 0: down_list.append((d_s, d_m))
 
-    top_u = [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]]
-    top_d = [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:10]]
-    return str(success_days), top_u, top_d
+    return str(success_days), [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]], \
+           [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:10]]
 
 def notify_line(msg):
     requests.post("https://api.line.me/v2/bot/message/push", 
@@ -114,12 +114,13 @@ def notify_line(msg):
                   json={"to": USER_ID, "messages": [{"type": "text", "text": msg[:5000]}]})
 
 if __name__ == "__main__":
-    day_count, up, down = get_stock_data()
+    count, up, down = get_stock_data()
     today = datetime.now().strftime("%Y.%m.%d")
-    msg = f"{today}　株価評価レポート\n（データ取得日数：{day_count}）\n\n"
+    msg = f"{today}　株価評価レポート\n（データ取得日数：{count}）\n\n"
     if up: msg += "【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(up)
     if down:
-        msg += "\n\n───────────────\n\n【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
+        if up: msg += "\n\n───────────────\n\n"
+        msg += "【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
     
     if up or down:
         msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate/?_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&burl=iris_top&cat1=market&cat2=top&dir=tl1-top%7Ctl2-map%7Ctl5-jpn&file=index.html&getFlg=on&OutSide=on"
