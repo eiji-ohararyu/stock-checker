@@ -36,7 +36,7 @@ def calculate_score(df, info):
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
     
-    # ② ボリンジャーバンド (15点)
+    # ② BB (15点)
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; u_d.append("BB反発(+15)")
     elif curr['close'] < curr['bbu'] and prev['close'] >= curr['bbu']: d_s += 15; d_d.append("BB反落(+15)")
     
@@ -54,7 +54,7 @@ def calculate_score(df, info):
     if curr['vol_avg'] > 0 and (curr['volume'] / curr['vol_avg']) > 2:
         u_s += 20; d_s += 20; u_d.append("爆量(+20)"); d_d.append("爆量(+20)")
     
-    # ⑥ 25日線傾き (10点)
+    # ⑥ 25日線 (10点)
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25線上向(+10)")
     else: d_s += 10; d_d.append("25線下向(+10)")
 
@@ -66,13 +66,11 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 1. 銘柄情報の取得
+    # 1. 銘柄情報の取得 (フィルタリングなし)
     try:
         r_info = requests.get(f"{host}/equities/info", headers=headers)
         if r_info.status_code == 200:
             for item in r_info.json().get("data", []):
-                # NISA不可銘柄を除外 (AssignmentFlag "0" が通常銘柄)
-                if item.get("AssignmentFlag") != "0": continue 
                 code = str(item.get("Code", ""))[:4]
                 name_map[code] = {
                     "name": item.get("CompanyName", "不明"),
@@ -96,8 +94,10 @@ def get_stock_data():
     up_list, down_list = [], []
     for code, group in df.groupby('Code'):
         short_code = str(code)[:4]
-        if short_code not in name_map or len(group) < 10: continue
-        u_s, u_m, d_s, d_m = calculate_score(group.copy(), name_map[short_code])
+        # name_mapになくても計算は続行
+        info = name_map.get(short_code, {"name": "不明", "sector": "-"})
+        if len(group) < 10: continue
+        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
         if u_s >= 40: up_list.append((u_s, f"{short_code} {u_m}"))
         if d_s >= 40: down_list.append((d_s, f"{short_code} {d_m}"))
 
@@ -112,9 +112,15 @@ def notify_line(msg):
 if __name__ == "__main__":
     rep, up, down = get_stock_data()
     msg = f"【判定結果】{rep}\n\n"
-    if up: msg += "【総合評価：上昇期待TOP10】\n\n" + "\n\n".join(up)
-    if down: msg += "\n\n" + "─" * 15 + "\n\n【総合評価：下落警戒TOP10】\n\n" + "\n\n".join(down)
+    content = ""
+    if up: content += "【総合評価：上昇期待TOP10】\n\n" + "\n\n".join(up)
+    if down:
+        if content: content += "\n\n" + "─" * 15 + "\n\n"
+        content += "【総合評価：下落警戒TOP10】\n\n" + "\n\n".join(down)
     
-    if up or down:
-        msg += "\n\n" + "─" * 15 + "\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate"
+    if content:
+        msg += content + "\n\n" + "─" * 15 + "\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate"
         notify_line(msg)
+    else:
+        # ヒットがない場合も状況がわかるように通知
+        notify_line(f"【判定結果】{rep}\n\n現在、条件に合う銘柄はありません。")
