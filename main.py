@@ -23,7 +23,7 @@ def calculate_indicators(df):
     df['vol_avg'] = df['volume'].rolling(5).mean()
     return df
 
-def calculate_score(df, info):
+def calculate_score(df, info, short_code):
     df = calculate_indicators(df)
     if len(df) < 2: return 0, "", 0, ""
     prev, curr = df.iloc[-2], df.iloc[-1]
@@ -46,7 +46,7 @@ def calculate_score(df, info):
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
-    header = f"{info['name']} ({info['sector']})\n{curr['close']}円"
+    header = f"{short_code} {info['name']} ({info['sector']})\n{curr['close']}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
@@ -54,16 +54,26 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 解決策：東証公式のマスターCSVを直接読み込む
+    # 東証CSVの読み込みを修正
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url)
         res.encoding = 'shift_jis'
+        # 銘柄名や業種を確実に取得するため、ヘッダーを自動認識させてから空白を除去
         csv_df = pd.read_csv(io.StringIO(res.text))
+        csv_df.columns = csv_df.columns.str.strip() # 列名の空白削除
+        
         for _, row in csv_df.iterrows():
-            code = str(row['コード'])[:4]
-            name_map[code] = {"name": row['銘柄名'], "sector": row['17業種区分']}
-    except: pass
+            # コード列から4桁を抽出（数値や文字列のゆらぎに対応）
+            raw_code = str(row['コード']).strip()
+            code = raw_code[:4]
+            if code.isdigit() or (len(code) == 4 and code[3].isalpha()):
+                name_map[code] = {
+                    "name": str(row['銘柄名']).strip(),
+                    "sector": str(row['17業種区分']).strip()
+                }
+    except Exception as e:
+        print(f"CSV Error: {e}")
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -71,7 +81,9 @@ def get_stock_data():
         r = requests.get(f"{host}/equities/bars/daily", headers=headers, params={"date": d})
         if r.status_code == 200:
             day_data = r.json().get("data", [])
-            if day_data: all_data.extend(day_data); success_days += 1
+            if day_data:
+                all_data.extend(day_data)
+                success_days += 1
     
     if not all_data: return "0", [], []
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
@@ -79,11 +91,11 @@ def get_stock_data():
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
         short_code = str(code)[:4]
-        # 重複表示を避けるため、ここでは銘柄名のみ取得
+        # name_mapから引く。見つからない場合のみ「新規上場等」
         info = name_map.get(short_code, {"name": "新規上場等", "sector": "-"})
-        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
-        if u_s > 0: up_list.append((u_s, f"{short_code} {u_m}"))
-        if d_s > 0: down_list.append((d_s, f"{short_code} {d_m}"))
+        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, short_code)
+        if u_s > 0: up_list.append((u_s, u_m))
+        if d_s > 0: down_list.append((d_s, d_m))
 
     return str(success_days), [x[1] for x in sorted(up_list, reverse=True)[:10]], [x[1] for x in sorted(down_list, reverse=True)[:10]]
 
