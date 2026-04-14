@@ -10,7 +10,7 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # トヨタのログで確認できた大文字キー (C=Close, Vo=Volume) を使用
+    # 成功ログに基づく大文字キー (C=Close, Vo=Volume)
     df['close'] = pd.to_numeric(df['C'], errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     
@@ -35,7 +35,7 @@ def calculate_score(df, name):
     if p['ma5'] < p['ma25'] and c['ma5'] > c['ma25']: u_s += 20; u_d.append("GC(+20)")
     if c['close'] > c['bbl'] and p['close'] <= p['bbl']: u_s += 15; u_d.append("BB反発(+15)")
     if not np.isnan(c['rsi']) and c['rsi'] > p['rsi'] and p['rsi'] < 35: u_s += 15; u_d.append("RSI底(+15)")
-    if ((c['close'] - p['close']) / p['close']) * 100 > 3: u_s += 15; u_d.append("急騰(+15)")
+    if p['close'] > 0 and ((c['close'] - p['close']) / p['close']) * 100 > 3: u_s += 15; u_d.append("急騰(+15)")
     if c['volume'] > c['vol_avg'] * 2: u_s += 20; u_d.append("爆量(+20)")
     if c['ma25'] > p['ma25']: u_s += 10; u_d.append("25線上向(+10)")
 
@@ -46,23 +46,31 @@ def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     
+    # 1. 銘柄情報取得 (パスを /listed/info に変更)
+    name_map = {}
     try:
-        # 1. 銘柄情報取得
-        r_info = requests.get(f"{host}/equities/info", headers=headers)
-        info_data = r_info.json().get("data", [])
-        if not info_data: return f"銘柄データ空: {r_info.text}", []
-        
-        # カラム名が Code/CompanyName か code/company_name か不明なため安全に処理
-        info_df = pd.DataFrame(info_data)
-        info_df.columns = [c.lower() for c in info_df.columns] # 一旦すべて小文字化
-        name_map = info_df.set_index('code')['company_name'].to_dict()
+        r_info = requests.get(f"{host}/listed/info", headers=headers)
+        if r_info.status_code == 200:
+            info_data = r_info.json().get("data", [])
+            for item in info_data:
+                # キー名の大文字小文字に依存しないよう取得
+                code = item.get("Code") or item.get("code")
+                name = item.get("CompanyName") or item.get("company_name")
+                if code and name:
+                    name_map[str(code)[:4]] = name
+    except:
+        pass # 銘柄名が取れなくても計算は続行
 
-        # 2. 株価データ取得 (直近50日分)
+    try:
+        # 2. 株価データ取得
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=50)
         params = {"from": start_dt.strftime("%Y-%m-%d"), "to": end_dt.strftime("%Y-%m-%d")}
         
         r_quote = requests.get(f"{host}/equities/bars/daily", headers=headers, params=params)
+        if r_quote.status_code != 200:
+            return f"株価取得失敗({r_quote.status_code}): {r_quote.text}", []
+
         quotes = r_quote.json().get("data", [])
         if not quotes: return "株価データ未配信", []
 
@@ -71,7 +79,6 @@ def get_stock_data():
         results = []
         for code, group in df.groupby('Code'):
             if len(group) < 25: continue
-            # トヨタのログ通り code は 72030 のような5桁
             short_code = str(code)[:4]
             name = name_map.get(short_code, f"コード:{short_code}")
             score, text = calculate_score(group.copy(), name)
