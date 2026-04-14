@@ -46,7 +46,6 @@ def calculate_score(df, info):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     header = f"{info['name']} ({info['sector']})\n{curr['close']}円"
-    # 内訳を一行にまとめる
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
@@ -57,11 +56,13 @@ def get_stock_data():
         r_info = requests.get(f"{host}/equities/info", headers=headers)
         if r_info.status_code == 200:
             for item in r_info.json().get("data", []):
-                code = str(item.get("Code", ""))[:4]
-                name_map[code] = {
-                    "name": item.get("CompanyName", "不明"),
-                    "sector": item.get("Sector17CodeName", "-")
-                }
+                # コードを4桁文字列にして確実に紐付ける
+                c = str(item.get("Code", ""))[:4]
+                if c:
+                    name_map[c] = {
+                        "name": item.get("CompanyName", "不明"),
+                        "sector": item.get("Sector17CodeName", "-")
+                    }
     except: pass
 
     all_data, success_days = [], 0
@@ -80,7 +81,8 @@ def get_stock_data():
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
         short_code = str(code)[:4]
-        info = name_map.get(short_code, {"name": "不明", "sector": "-"})
+        # 辞書引きに失敗してもコードだけは出すように対策
+        info = name_map.get(short_code, {"name": f"不明({short_code})", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info)
         if u_s > 0: up_list.append((u_s, f"{short_code} {u_m}"))
         if d_s > 0: down_list.append((d_s, f"{short_code} {d_m}"))
@@ -99,6 +101,6 @@ if __name__ == "__main__":
     if up: msg += "【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(up)
     if down:
         msg += "\n\n───────────────\n\n【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
+    
     if up or down:
-        msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://apps.apple.com/jp/app/sbi%E8%A8%BC%E5%88%B8-%E6%A0%AA-%E3%82%A2%E3%83%97%E3%83%AA-%E6%A0%AA%E4%BE%A1-%E6%8A%95%E8%B3%87%E6%83%85%E5%A0%B1/id1240742779"
         notify_line(msg)
