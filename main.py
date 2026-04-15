@@ -37,11 +37,9 @@ def calculate_score(df, info, code_str):
     if not np.isnan(curr['rsi']):
         if curr['rsi'] > prev['rsi'] and prev['rsi'] < 35: u_s += 15; u_d.append("RSI底打ち(+15)")
         elif curr['rsi'] < prev['rsi'] and prev['rsi'] > 65: d_s += 15; d_d.append("RSI天井打ち(+15)")
-    
     change = ((curr['close'] - prev['close']) / prev['close']) * 100 if prev['close'] > 0 else 0
     if change > 3: u_s += 15; u_d.append(f"急騰 {change:.1f}%(+15)")
     elif change < -3: d_s += 15; d_d.append(f"急落 {change:.1f}%(+15)")
-    
     if curr['vol_avg'] > 0 and (curr['volume'] / curr['vol_avg']) > 2:
         u_s += 20; d_s += 20; u_d.append("出来高2倍超(+20)"); d_d.append("出来高2倍超(+20)")
     if curr['volume'] > prev['volume']: u_s += 5; d_s += 5
@@ -49,9 +47,7 @@ def calculate_score(df, info, code_str):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     cur_p = int(curr['close']) if not np.isnan(curr['close']) else 0
-    # LINE表示用には先頭4桁を使用
-    display_code = code_str[:4]
-    header = f"{display_code} {info['name']} ({info['sector']})\n{cur_p}円"
+    header = f"{code_str[:4]} {info['name']} ({info['sector']})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
@@ -63,16 +59,14 @@ def get_stock_data():
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url, timeout=10)
         res.encoding = 'shift_jis'
-        csv_df = pd.read_csv(io.StringIO(res.text), dtype={'コード': str})
+        csv_df = pd.read_csv(io.StringIO(res.text))
         for _, row in csv_df.iterrows():
-            c_val = str(row['コード']).strip()
-            if len(c_val) >= 4:
-                # 5桁（4桁+0）にして辞書に登録
-                c_key_5 = c_val[:4] + "0"
-                name_map[c_key_5] = {
-                    "name": str(row['銘柄名']).strip(),
-                    "sector": str(row['17業種区分']).strip()
-                }
+            try:
+                # 確実に「5桁の文字列」にして辞書に登録
+                raw_c = str(row['コード']).strip()
+                c_5 = str(int(float(raw_c)))[:4] + "0"
+                name_map[c_5] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
+            except: continue
     except: pass
 
     all_data, success_days = [], 0
@@ -91,9 +85,12 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        # J-QuantsのCodeを5桁の文字列としてそのまま扱う
-        s_code_5 = str(int(float(code)))
-        
+        # 検索側：Code("13010")を確実に数値化して、また5桁の文字列に戻す
+        try:
+            s_code_5 = str(int(float(code)))
+        except:
+            s_code_5 = str(code).strip()
+            
         info = name_map.get(s_code_5, {"name": "銘柄不明", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code_5)
         if u_s > 0: up_list.append((u_s, u_m))
