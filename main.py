@@ -13,7 +13,6 @@ USER_ID = os.getenv("LINE_USER_ID", "").strip()
 def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
-    
     diff = df['close'].diff()
     up, down = diff.clip(lower=0), -diff.clip(upper=0)
     df['rsi'] = up.rolling(14).mean() / (up.rolling(14).mean() + down.rolling(14).mean()) * 100
@@ -50,7 +49,9 @@ def calculate_score(df, info, code_str):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     cur_p = int(curr['close']) if not np.isnan(curr['close']) else 0
-    header = f"{code_str} {info['name']} ({info['sector']})\n{cur_p}円"
+    # LINE表示用には先頭4桁を使用
+    display_code = code_str[:4]
+    header = f"{display_code} {info['name']} ({info['sector']})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
@@ -58,7 +59,6 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 辞書作成（マスターデータ側を4桁文字列に固定）
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url, timeout=10)
@@ -67,8 +67,12 @@ def get_stock_data():
         for _, row in csv_df.iterrows():
             c_val = str(row['コード']).strip()
             if len(c_val) >= 4:
-                # 確実に4桁で登録
-                name_map[c_val[:4]] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
+                # 5桁（4桁+0）にして辞書に登録
+                c_key_5 = c_val[:4] + "0"
+                name_map[c_key_5] = {
+                    "name": str(row['銘柄名']).strip(),
+                    "sector": str(row['17業種区分']).strip()
+                }
     except: pass
 
     all_data, success_days = [], 0
@@ -87,16 +91,11 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
+        # J-QuantsのCodeを5桁の文字列としてそのまま扱う
+        s_code_5 = str(int(float(code)))
         
-        # 紐付け処理：J-QuantsのCode(例:"70110")を確実に数値のintにしてから4文字取る
-        # これで float由来の".0" などが混じるのを完全に防ぐ
-        try:
-            s_code = str(int(float(code)))[:4]
-        except:
-            s_code = str(code).strip()[:4]
-            
-        info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
-        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code)
+        info = name_map.get(s_code_5, {"name": "銘柄不明", "sector": "-"})
+        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code_5)
         if u_s > 0: up_list.append((u_s, u_m))
         if d_s > 0: down_list.append((d_s, d_m))
 
