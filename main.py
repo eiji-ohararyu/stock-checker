@@ -11,7 +11,6 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # 分割対応：調整後終値(AdjustmentClose)を優先。データがなければ終値(C)を使用
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     
@@ -32,7 +31,6 @@ def calculate_score(df, info, code_str):
     u_s, d_s = 0, 0
     u_d, d_d = [], []
 
-    # テクニカル判定
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; u_d.append("BB下限反発(+15)")
@@ -51,8 +49,7 @@ def calculate_score(df, info, code_str):
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
-    # 出力（調整後終値を優先して表示）
-    cur_p = curr['close'] if not np.isnan(curr['close']) else 0
+    cur_p = int(curr['close']) if not np.isnan(curr['close']) else 0
     header = f"{code_str} {info['name']} ({info['sector']})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
@@ -61,23 +58,22 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 東証マスターCSV取得 (型不一致と空白を徹底排除)
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url, timeout=10)
         res.encoding = 'shift_jis'
-        csv_df = pd.read_csv(io.StringIO(res.text))
-        csv_df.columns = csv_df.columns.str.strip()
-        
+        csv_df = pd.read_csv(io.StringIO(res.text), dtype={'コード': str})
         for _, row in csv_df.iterrows():
             c_val = str(row['コード']).strip()
             if len(c_val) >= 4:
-                # 4桁コードをキーにする
-                name_map[c_val[:4]] = {
-                    "name": str(row['銘柄名']).strip(),
-                    "sector": str(row['17業種区分']).strip()
-                }
-    except: pass
+                name_map[c_val[:4]] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
+        
+        # デバッグ1: 辞書の中身を一部表示
+        print(f"--- 辞書作成チェック ---")
+        print(f"辞書件数: {len(name_map)}")
+        print(f"サンプル(最初の5件): {dict(list(name_map.items())[:5])}")
+    except Exception as e:
+        print(f"CSV読み込みエラー: {e}")
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -91,14 +87,24 @@ def get_stock_data():
     
     if not all_data: return "0", [], []
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
-    up_list, down_list = [], []
     
+    # デバッグ2: J-Quants側のCode形式をチェック
+    sample_code = df['Code'].iloc[0]
+    print(f"--- 検索直前チェック ---")
+    print(f"J-Quants Code raw値: {sample_code} (型: {type(sample_code)})")
+    
+    up_list, down_list = [], []
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        # J-Quantsの5桁Code（例: 70110）を4桁（7011）に変換
-        s_code = str(code).strip()[:4]
-        info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
         
+        # ここで変換
+        s_code = str(int(float(code)))[:4]
+        
+        # デバッグ3: 特定の銘柄でマッチングを試すログ
+        if s_code == "7011": # 三菱重工の例
+             print(f"照合テスト [Code: {code} -> Key: {s_code}] マッチ結果: {name_map.get(s_code)}")
+
+        info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code)
         if u_s > 0: up_list.append((u_s, u_m))
         if d_s > 0: down_list.append((d_s, d_m))
