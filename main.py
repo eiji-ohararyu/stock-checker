@@ -10,20 +10,23 @@ API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
-def normalize_code_5(code):
+def clean_code_str(raw_val):
     """
-    あらゆるコード入力を『5桁の純粋な数字文字列』に分離・固定する
+    【分離の徹底】
+    入力がどんなstrでも、余計な空白・改行・小数点を除去し、
+    純粋な数字のみの5桁文字列として抽出する。
     """
-    try:
-        # 小数点や空白を除去して整数文字列にする
-        s = str(code).strip().split('.')[0]
-        # 4桁（JPX形式）なら末尾に0を付けて5桁にする
-        if len(s) == 4:
-            return s + "0"
-        # 5桁（J-Quants形式）ならそのまま
-        return s
-    except:
+    s = str(raw_val).strip() # 前後の空白・改行削除
+    s = s.split('.')[0]      # 小数点以下を切り捨て
+    
+    # 数字以外（業種コード等）が混じった場合のガード
+    if not s.isdigit():
         return ""
+        
+    # 4桁なら0を足して5桁に統一
+    if len(s) == 4:
+        s += "0"
+    return s
 
 def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
@@ -62,7 +65,6 @@ def calculate_score(df, info, code_str):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     cur_p = int(curr['close']) if not np.isnan(curr['close']) else 0
-    # 表示は4桁
     header = f"{code_str[:4]} {info['name']} ({info['sector']})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
@@ -77,15 +79,10 @@ def get_stock_data():
         res.encoding = 'shift_jis'
         csv_df = pd.read_csv(io.StringIO(res.text))
         for _, row in csv_df.iterrows():
-            # 辞書作成時に5桁に統一
-            c_key = normalize_code_5(row.get('コード', ''))
+            c_key = clean_code_str(row.get('コード', ''))
             if c_key:
-                name_map[c_key] = {
-                    "name": str(row.get('銘柄名', '不明')).strip(),
-                    "sector": str(row.get('17業種区分', '-')).strip()
-                }
-    except Exception as e:
-        print(f"辞書作成エラー: {e}")
+                name_map[c_key] = {"name": str(row.get('銘柄名', '不明')).strip(), "sector": str(row.get('17業種区分', '-')).strip()}
+    except: pass
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -103,8 +100,7 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        # 検索時も同じ5桁ルールで検索
-        s_code_5 = normalize_code_5(code)
+        s_code_5 = clean_code_str(code)
         info = name_map.get(s_code_5, {"name": "銘柄不明", "sector": "-"})
         
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code_5)
