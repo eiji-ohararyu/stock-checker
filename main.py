@@ -29,7 +29,7 @@ def calculate_score(df, info, code_str):
     if len(df) < 2: return 0, "", 0, ""
     prev, curr = df.iloc[-2], df.iloc[-1]
     u_s, d_s = 0, 0
-    u_d, d_d = [], []
+    u_d, d_d = [] , []
 
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
@@ -51,28 +51,33 @@ def calculate_score(df, info, code_str):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     cur_p = int(curr['C']) if not np.isnan(curr['C']) else 0
-    header = f"{code_str} {info['name']} ({info['sector']})\n{cur_p}円"
+    # info['error'] があれば銘柄名の代わりに表示
+    name_display = info.get('error', info.get('name', '銘柄不明'))
+    header = f"{code_str} {name_display} ({info.get('sector', '-')})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
     host = "https://api.jquants.com/v2"
     headers = {"x-api-key": API_KEY}
     name_map = {}
+    fetch_error = None
     
-    # 銘柄情報の取得と型固定
     try:
         r_info = requests.get(f"{host}/listed/info", headers=headers)
         if r_info.status_code == 200:
-            for item in r_info.json().get("info", []):
-                # 確実に4桁の「文字列」として保存
-                code_raw = str(item.get("Code", ""))
-                code_4 = code_raw[:4]
+            data = r_info.json().get("info", [])
+            if not data:
+                fetch_error = "APIレスポンス空"
+            for item in data:
+                code_4 = str(item.get("Code", ""))[:4]
                 name_map[code_4] = {
                     "name": item.get("CompanyName", "不明"),
                     "sector": item.get("Sector17CodeName", "-")
                 }
+        else:
+            fetch_error = f"APIエラー({r_info.status_code})"
     except Exception as e:
-        print(f"銘柄名取得失敗: {e}")
+        fetch_error = f"例外発生({type(e).__name__})"
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -90,9 +95,12 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        # 照合側も確実に「4桁の文字列」にする
         s_code = str(code)[:4]
-        info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
+        
+        # infoを取得し、name_mapにない場合はエラー状況を付与
+        info = name_map.get(s_code)
+        if info is None:
+            info = {"name": "銘柄不明", "sector": "-", "error": fetch_error if fetch_error else "Map未登録"}
         
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code)
         if u_s > 0: up_list.append((u_s, u_m))
