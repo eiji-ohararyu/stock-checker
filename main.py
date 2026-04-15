@@ -58,6 +58,7 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
+    # 辞書作成（マスターデータ側を4桁文字列に固定）
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url, timeout=10)
@@ -66,14 +67,9 @@ def get_stock_data():
         for _, row in csv_df.iterrows():
             c_val = str(row['コード']).strip()
             if len(c_val) >= 4:
+                # 確実に4桁で登録
                 name_map[c_val[:4]] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
-        
-        # デバッグ1: 辞書の中身を一部表示
-        print(f"--- 辞書作成チェック ---")
-        print(f"辞書件数: {len(name_map)}")
-        print(f"サンプル(最初の5件): {dict(list(name_map.items())[:5])}")
-    except Exception as e:
-        print(f"CSV読み込みエラー: {e}")
+    except: pass
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -87,23 +83,18 @@ def get_stock_data():
     
     if not all_data: return "0", [], []
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
-    
-    # デバッグ2: J-Quants側のCode形式をチェック
-    sample_code = df['Code'].iloc[0]
-    print(f"--- 検索直前チェック ---")
-    print(f"J-Quants Code raw値: {sample_code} (型: {type(sample_code)})")
-    
     up_list, down_list = [], []
+    
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
         
-        # ここで変換
-        s_code = str(int(float(code)))[:4]
-        
-        # デバッグ3: 特定の銘柄でマッチングを試すログ
-        if s_code == "7011": # 三菱重工の例
-             print(f"照合テスト [Code: {code} -> Key: {s_code}] マッチ結果: {name_map.get(s_code)}")
-
+        # 紐付け処理：J-QuantsのCode(例:"70110")を確実に数値のintにしてから4文字取る
+        # これで float由来の".0" などが混じるのを完全に防ぐ
+        try:
+            s_code = str(int(float(code)))[:4]
+        except:
+            s_code = str(code).strip()[:4]
+            
         info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code)
         if u_s > 0: up_list.append((u_s, u_m))
