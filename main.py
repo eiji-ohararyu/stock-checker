@@ -11,7 +11,6 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # 分割対応：調整後終値(AdjustmentClose)を優先
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     
@@ -32,11 +31,11 @@ def calculate_score(df, info, code_str):
     u_s, d_s = 0, 0
     u_d, d_d = [], []
 
-    # テクニカル判定
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
-    elif prev['ma5'] > prev['ma25'] and curr['ma5'] < curr['ma25']: d_s += 20; d_d.append("DC発生(+20)")
+    elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; u_d.append("BB下限反発(+15)")
     elif curr['close'] < curr['bbu'] and prev['close'] >= curr['bbu']: d_s += 15; d_d.append("BB上限反落(+15)")
+    
     if not np.isnan(curr['rsi']):
         if curr['rsi'] > prev['rsi'] and prev['rsi'] < 35: u_s += 15; u_d.append("RSI底打ち(+15)")
         elif curr['rsi'] < prev['rsi'] and prev['rsi'] > 65: d_s += 15; d_d.append("RSI天井打ち(+15)")
@@ -51,8 +50,7 @@ def calculate_score(df, info, code_str):
     if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
-    # 出力
-    cur_p = pd.to_numeric(curr['C'], errors='coerce')
+    cur_p = int(curr['C']) if not np.isnan(curr['C']) else 0
     header = f"{code_str} {info['name']} ({info['sector']})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
@@ -61,13 +59,13 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # プランA：公式APIから銘柄情報を取得
+    # 銘柄情報の取得と型固定
     try:
         r_info = requests.get(f"{host}/listed/info", headers=headers)
         if r_info.status_code == 200:
             for item in r_info.json().get("info", []):
+                # 確実に4桁の「文字列」として保存
                 code_raw = str(item.get("Code", ""))
-                # J-Quantsのコードは5桁(末尾0)なので、最初の4桁をキーにする
                 code_4 = code_raw[:4]
                 name_map[code_4] = {
                     "name": item.get("CompanyName", "不明"),
@@ -92,7 +90,8 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        s_code = str(code).strip()[:4]
+        # 照合側も確実に「4桁の文字列」にする
+        s_code = str(code)[:4]
         info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
         
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code)
@@ -117,5 +116,5 @@ if __name__ == "__main__":
         msg += "【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
     
     if up or down:
-        msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate/?_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&burl=iris_top&cat1=market&cat2=top&dir=tl1-top%7Ctl2-map%7Ctl5-jpn&file=index.html&getFlg=on&OutSide=on"
+        msg += "\n\n───────────────\n詳細確認:\nhttps://www.sbisec.co.jp/"
         notify_line(msg)
