@@ -12,8 +12,9 @@ USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def clean_code_str(raw_val):
     """
-    不純物を除去して『5桁の数字のみの文字列』として精製。
-    str処理における『原因の分離』をここで行う。
+    【不純物の分離】
+    どのような型や形式でも、余計な文字を削ぎ落として
+    『5桁の数字のみの文字列』に統一する。
     """
     s = str(raw_val).strip().split('.')[0]
     if not s.isdigit():
@@ -56,16 +57,16 @@ def calculate_score(df, info, code_str):
         if curr['rsi'] > prev['rsi'] and prev['rsi'] < 35: u_s += 15; u_d.append("RSI底打ち(+15)")
         elif curr['rsi'] < prev['rsi'] and prev['rsi'] > 65: d_s += 15; d_d.append("RSI天井打ち(+15)")
     
-    # 4. 急騰落
+    # 4. 急騰落判定
     change = ((curr['close'] - prev['close']) / prev['close']) * 100 if prev['close'] > 0 else 0
     if change > 3: u_s += 15; u_d.append(f"急騰 {change:.1f}%(+15)")
     elif change < -3: d_s += 15; d_d.append(f"急落 {change:.1f}%(+15)")
     
     # 5. 出来高
     if curr['vol_avg'] > 0 and (curr['volume'] / curr['vol_avg']) > 2:
-        u_s += 20; d_s += 20; u_d.append("出来高2倍超(+20)")
+        u_s += 20; d_s += 20; u_d.append("出来高2倍超(+20)"); d_d.append("出来高2倍超(+20)")
 
-    # 6. 中期トレンド（25日線の傾き）
+    # 6. 中期トレンド判定（25日線の傾き）
     if not np.isnan(prev['ma25']) and not np.isnan(curr['ma25']):
         if curr['ma25'] > prev['ma25']:
             u_s += 15; u_d.append("25日線上向き(+15)")
@@ -110,12 +111,10 @@ def get_stock_data():
         if len(group) < 10: continue
         s_code_5 = clean_code_str(code)
         info = name_map.get(s_code_5, {"name": "銘柄不明", "sector": "-"})
-        
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code_5)
         if u_s > 0: up_list.append((u_s, u_m))
         if d_s > 0: down_list.append((d_s, d_m))
 
-    # 上昇はTOP10、下落はTOP5
     return str(success_days), \
            [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]], \
            [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:5]]
