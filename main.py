@@ -11,8 +11,7 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def calculate_indicators(df):
-    # 分割対応：調整後終値(AdjustmentClose)を優先。データがなければ終値(C)を使用
-    # これにより分割時の「窓開け」による誤判定を防ぎます
+    # 分割対応：調整後終値(AdjustmentClose)を優先
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     
@@ -35,7 +34,7 @@ def calculate_score(df, info, code_str):
 
     # テクニカル判定
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
-    elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
+    elif prev['ma5'] > prev['ma25'] and curr['ma5'] < curr['ma25']: d_s += 20; d_d.append("DC発生(+20)")
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; u_d.append("BB下限反発(+15)")
     elif curr['close'] < curr['bbu'] and prev['close'] >= curr['bbu']: d_s += 15; d_d.append("BB上限反落(+15)")
     if not np.isnan(curr['rsi']):
@@ -62,24 +61,20 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
-    # 東証マスターCSV取得 (型不一致と空白を徹底排除)
+    # プランA：公式APIから銘柄情報を取得
     try:
-        csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
-        res = requests.get(csv_url)
-        res.encoding = 'shift_jis'
-        # 1行目はタイトル等の可能性があるため、スキップ設定や型指定を厳密に行う
-        csv_df = pd.read_csv(io.StringIO(res.text))
-        csv_df.columns = csv_df.columns.str.strip()
-        
-        for _, row in csv_df.iterrows():
-            c_val = str(row['コード']).strip()
-            if len(c_val) >= 4:
-                code_key = c_val[:4]
-                name_map[code_key] = {
-                    "name": str(row['銘柄名']).strip(),
-                    "sector": str(row['17業種区分']).strip()
+        r_info = requests.get(f"{host}/listed/info", headers=headers)
+        if r_info.status_code == 200:
+            for item in r_info.json().get("info", []):
+                code_raw = str(item.get("Code", ""))
+                # J-Quantsのコードは5桁(末尾0)なので、最初の4桁をキーにする
+                code_4 = code_raw[:4]
+                name_map[code_4] = {
+                    "name": item.get("CompanyName", "不明"),
+                    "sector": item.get("Sector17CodeName", "-")
                 }
-    except: pass
+    except Exception as e:
+        print(f"銘柄名取得失敗: {e}")
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -97,7 +92,6 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        # J-Quants側のCodeも確実に4桁の「文字列」に変換して比較
         s_code = str(code).strip()[:4]
         info = name_map.get(s_code, {"name": "銘柄不明", "sector": "-"})
         
