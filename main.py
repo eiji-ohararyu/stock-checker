@@ -12,18 +12,12 @@ USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def clean_code_str(raw_val):
     """
-    【分離の徹底】
-    入力がどんなstrでも、余計な空白・改行・小数点を除去し、
-    純粋な数字のみの5桁文字列として抽出する。
+    不純物を除去して『5桁の数字のみの文字列』として精製。
+    str処理における『原因の分離』をここで行う。
     """
-    s = str(raw_val).strip() # 前後の空白・改行削除
-    s = s.split('.')[0]      # 小数点以下を切り捨て
-    
-    # 数字以外（業種コード等）が混じった場合のガード
+    s = str(raw_val).strip().split('.')[0]
     if not s.isdigit():
         return ""
-        
-    # 4桁なら0を足して5桁に統一
     if len(s) == 4:
         s += "0"
     return s
@@ -31,6 +25,7 @@ def clean_code_str(raw_val):
 def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
+    
     diff = df['close'].diff()
     up, down = diff.clip(lower=0), -diff.clip(upper=0)
     df['rsi'] = up.rolling(14).mean() / (up.rolling(14).mean() + down.rolling(14).mean()) * 100
@@ -48,21 +43,34 @@ def calculate_score(df, info, code_str):
     u_s, d_s = 0, 0
     u_d, d_d = [], []
 
+    # 1. 移動平均線クロス (短期 vs 中期)
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
+    
+    # 2. ボリンジャーバンド反発
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; u_d.append("BB下限反発(+15)")
     elif curr['close'] < curr['bbu'] and prev['close'] >= curr['bbu']: d_s += 15; d_d.append("BB上限反落(+15)")
+    
+    # 3. RSI
     if not np.isnan(curr['rsi']):
         if curr['rsi'] > prev['rsi'] and prev['rsi'] < 35: u_s += 15; u_d.append("RSI底打ち(+15)")
         elif curr['rsi'] < prev['rsi'] and prev['rsi'] > 65: d_s += 15; d_d.append("RSI天井打ち(+15)")
+    
+    # 4. 急騰落
     change = ((curr['close'] - prev['close']) / prev['close']) * 100 if prev['close'] > 0 else 0
     if change > 3: u_s += 15; u_d.append(f"急騰 {change:.1f}%(+15)")
     elif change < -3: d_s += 15; d_d.append(f"急落 {change:.1f}%(+15)")
+    
+    # 5. 出来高
     if curr['vol_avg'] > 0 and (curr['volume'] / curr['vol_avg']) > 2:
-        u_s += 20; d_s += 20; u_d.append("出来高2倍超(+20)"); d_d.append("出来高2倍超(+20)")
-    if curr['volume'] > prev['volume']: u_s += 5; d_s += 5
-    if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
-    else: d_s += 10; d_d.append("25日線下向き(+10)")
+        u_s += 20; d_s += 20; u_d.append("出来高2倍超(+20)")
+
+    # 6. 中期トレンド（25日線の傾き）
+    if not np.isnan(prev['ma25']) and not np.isnan(curr['ma25']):
+        if curr['ma25'] > prev['ma25']:
+            u_s += 15; u_d.append("25日線上向き(+15)")
+        elif curr['ma25'] < prev['ma25']:
+            d_s += 15; d_d.append("25日線下向き(+15)")
 
     cur_p = int(curr['close']) if not np.isnan(curr['close']) else 0
     header = f"{code_str[:4]} {info['name']} ({info['sector']})\n{cur_p}円"
@@ -107,8 +115,10 @@ def get_stock_data():
         if u_s > 0: up_list.append((u_s, u_m))
         if d_s > 0: down_list.append((d_s, d_m))
 
-    return str(success_days), [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]], \
-           [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:10]]
+    # 上昇はTOP10、下落はTOP5
+    return str(success_days), \
+           [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]], \
+           [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:5]]
 
 def notify_line(msg):
     requests.post("https://api.line.me/v2/bot/message/push", 
@@ -122,7 +132,7 @@ if __name__ == "__main__":
     if up: msg += "【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(up)
     if down:
         if up: msg += "\n\n───────────────\n\n"
-        msg += "【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
+        msg += "【判定：下落注意 TOP5】\n\n" + "\n\n".join(down)
     
     if up or down:
         msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate/?_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&burl=iris_top&cat1=market&cat2=top&dir=tl1-top%7Ctl2-map%7Ctl5-jpn&file=index.html&getFlg=on&OutSide=on"
