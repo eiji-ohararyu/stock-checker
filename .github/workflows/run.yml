@@ -2,8 +2,9 @@ name: J-Quants Stock Scanner
 
 on:
   schedule:
-    # 日本時間 16:00 (UTC 7:00) に実行
-    - cron: '0 7 * * 1-5'
+    # 日本時間 17:30 (UTC 8:30) に実行
+    # GitHub Actionsの遅延を含め、18時前後の着信を想定
+    - cron: '30 8 * * 1-5'
   workflow_dispatch: # 手動実行ボタン用
 
 jobs:
