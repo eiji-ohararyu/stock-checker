@@ -10,6 +10,21 @@ API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
+def normalize_code_5(code):
+    """
+    あらゆるコード入力を『5桁の純粋な数字文字列』に分離・固定する
+    """
+    try:
+        # 小数点や空白を除去して整数文字列にする
+        s = str(code).strip().split('.')[0]
+        # 4桁（JPX形式）なら末尾に0を付けて5桁にする
+        if len(s) == 4:
+            return s + "0"
+        # 5桁（J-Quants形式）ならそのまま
+        return s
+    except:
+        return ""
+
 def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
@@ -47,6 +62,7 @@ def calculate_score(df, info, code_str):
     else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     cur_p = int(curr['close']) if not np.isnan(curr['close']) else 0
+    # 表示は4桁
     header = f"{code_str[:4]} {info['name']} ({info['sector']})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
@@ -61,13 +77,15 @@ def get_stock_data():
         res.encoding = 'shift_jis'
         csv_df = pd.read_csv(io.StringIO(res.text))
         for _, row in csv_df.iterrows():
-            try:
-                # 確実に「5桁の文字列」にして辞書に登録
-                raw_c = str(row['コード']).strip()
-                c_5 = str(int(float(raw_c)))[:4] + "0"
-                name_map[c_5] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
-            except: continue
-    except: pass
+            # 辞書作成時に5桁に統一
+            c_key = normalize_code_5(row.get('コード', ''))
+            if c_key:
+                name_map[c_key] = {
+                    "name": str(row.get('銘柄名', '不明')).strip(),
+                    "sector": str(row.get('17業種区分', '-')).strip()
+                }
+    except Exception as e:
+        print(f"辞書作成エラー: {e}")
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -85,13 +103,10 @@ def get_stock_data():
     
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        # 検索側：Code("13010")を確実に数値化して、また5桁の文字列に戻す
-        try:
-            s_code_5 = str(int(float(code)))
-        except:
-            s_code_5 = str(code).strip()
-            
+        # 検索時も同じ5桁ルールで検索
+        s_code_5 = normalize_code_5(code)
         info = name_map.get(s_code_5, {"name": "銘柄不明", "sector": "-"})
+        
         u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code_5)
         if u_s > 0: up_list.append((u_s, u_m))
         if d_s > 0: down_list.append((d_s, d_m))
