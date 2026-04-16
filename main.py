@@ -25,7 +25,7 @@ def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     df = df.dropna(subset=['close']).reset_index(drop=True)
-    if len(df) < 30: return None
+    if len(df) < 40: return None
     
     # 移動平均
     df['ma5'] = df['close'].rolling(5).mean()
@@ -35,23 +35,21 @@ def calculate_indicators(df):
     df['vol_avg_short'] = df['volume'].rolling(2).mean()
     df['vol_avg_mid'] = df['volume'].rolling(10).mean()
     
-    # 直近10日間の最高値（上抜け判定用）
+    # 各種節目判定用
     df['high_10d'] = df['high'].shift(1).rolling(10).max()
+    df['high_20d'] = df['high'].shift(1).rolling(20).max()
     
-    # ボリンジャーバンド（過熱判定用）
+    # ボリンジャーバンド
     df['bbm'] = df['close'].rolling(20).mean()
     df['std'] = df['close'].rolling(20).std()
-    df['bbh'] = df['bbm'] + (df['std'] * 2) # +2σ
+    df['bbh'] = df['bbm'] + (df['std'] * 2)
     
     return df
 
-def detect_up_patterns(prices):
-    """形状検知ロジック（谷の深さ3%・間隔7日以上）"""
+def detect_bottom_pattern(prices):
+    """ダブルボトムのみ検知（信頼度重視）"""
     res = {'score': 0, 'desc': []}
-    if len(prices) < 40: return res
-    
     t_idx = argrelextrema(prices, np.less_equal, order=5)[0]
-    p_idx = argrelextrema(prices, np.greater_equal, order=5)[:20] # 演算負荷軽減
     
     valid_troughs = []
     for i in t_idx:
@@ -59,30 +57,17 @@ def detect_up_patterns(prices):
         if len(lookback) > 0 and (lookback.max() - prices[i]) / lookback.max() > 0.03:
             valid_troughs.append(i)
 
-    # ダブルボトム
     if len(valid_troughs) >= 2:
         idx1, idx2 = valid_troughs[-2], valid_troughs[-1]
+        # 谷の間隔が7日以上、かつ谷の深さが2%以内の近似
         if (idx2 - idx1) >= 7 and abs(prices[idx1] - prices[idx2]) / prices[idx1] < 0.02:
-            res['score'] += 40; res['desc'].append("ダブルボトム(+40)")
-
-    # ソーサーボトム
-    p_win = prices[-20:]
-    c_min_idx = np.argmin(p_win)
-    if 5 <= c_min_idx <= 15 and p_win[0] > p_win[c_min_idx] * 1.04 and p_win[-1] > p_win[c_min_idx] * 1.02:
-        res['score'] += 35; res['desc'].append("ソーサーボトム(+35)")
-
-    # 三角保合い
-    p_idx_all = argrelextrema(prices, np.greater_equal, order=5)[0]
-    if len(p_idx_all) >= 2 and len(valid_troughs) >= 2:
-        if prices[p_idx_all[-2]] > prices[p_idx_all[-1]] and prices[valid_troughs[-2]] < prices[valid_troughs[-1]]:
-            res['score'] += 25; res['desc'].append("三角保合い(+25)")
+            res['score'] += 20; res['desc'].append("ダブルボトム(+20)")
     return res
 
 def get_stock_report():
-    """データ収集とスコアリング"""
+    """データ収集と再設計スコアリング"""
     host, headers = "https://api.jquants.com/v2", {"x-api-key": API_KEY}
     
-    # JPXから銘柄名簿を取得
     name_map = {}
     try:
         csv_res = requests.get("https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv", timeout=10)
@@ -93,7 +78,6 @@ def get_stock_report():
             name_map[code] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
     except: pass
 
-    # 株価データ取得
     all_prices, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(60)]
     for d in reversed(dates):
@@ -112,58 +96,58 @@ def get_stock_report():
         info = name_map.get(s_code, {"name": "不明", "sector": "不明"})
         df = calculate_indicators(group.copy())
         
-        # 必須条件：データ不足または流動性不足（10万株未満）の足切り
         if df is None or df['volume'].iloc[-1] < 100000: continue
         
         curr = df.iloc[-1]
         raw_s, d_l = 0, []
         
-        # 陽線・上抜け判定
+        # 1. 陽線判定（買いの意志）
         is_yang = curr['close'] > curr['open']
-        is_breakout = curr['close'] > curr['high_10d']
+        if is_yang: raw_s += 15; d_l.append("実体陽線(+15)")
         
-        # --- 1. GC判定 ---
+        # 2. GC判定
         gc_detected = False
         for i in range(len(df)-3, len(df)):
             if i <= 0: continue
-            # MA5がMA25を上抜けた瞬間、かつMA25が下げ止まっている
             if df['ma5'].iloc[i-1] <= df['ma25'].iloc[i-1] and df['ma5'].iloc[i] > df['ma25'].iloc[i]:
                 if df['ma25'].iloc[i] >= df['ma25'].iloc[i-1] and curr['close'] > df['ma25'].iloc[i]:
                     gc_detected = True; break
-        if gc_detected: raw_s += 25; d_l.append("GC初動(+25)")
+        if gc_detected: raw_s += 20; d_l.append("GC初動(+20)")
 
-        # --- 2. 補助指標 ---
-        # 25日線のトレンド継続性（3日連続上向き）
-        if df['ma25'].diff().iloc[-3:].min() >= 0:
-            raw_s += 15; d_l.append("25日線トレンド安定(+15)")
-        # 急騰
-        change = ((curr['close'] - df['close'].iloc[-2]) / df['close'].iloc[-2]) * 100 if df['close'].iloc[-2] > 0 else 0
-        if change > 3: raw_s += 15; d_l.append(f"急騰 {change:.1f}%(+15)")
+        # 3. MA25右肩上がり（トレンド確定：直近3日連続上昇）
+        if df['ma25'].diff().iloc[-3:].min() > 0:
+            raw_s += 25; d_l.append("MA25上昇継続(+25)")
+            
+        # 4. 高値上抜け（節目突破）
+        is_breakout = curr['close'] > curr['high_10d']
+        if is_breakout: raw_s += 20; d_l.append("高値上抜け(+20)")
         
-        # --- 3. 形状加点 ---
-        p = detect_up_patterns(df['close'].values)
+        # 5. 形状加点（ダブルボトムのみ）
+        p = detect_bottom_pattern(df['close'].values)
         raw_s += p['score']; d_l.extend(p['desc'])
         
-        # --- 4. 出来高倍率（信頼度乗算） ---
+        # 6. 抵抗近接デバフ（上の壁）
+        if curr['close'] * 1.02 > curr['high_20d']:
+            raw_s -= 30; d_l.append("抵抗近接(-30)")
+
+        # --- 出来高倍率（信頼度乗算） ---
         multiplier = 1.0
-        if len(df) >= 13: # インデックスエラー回避用のガード
+        if len(df) >= 13:
             base_vol = df['vol_avg_mid'].iloc[-3]
             vol_ratio = curr['vol_avg_short'] / base_vol if base_vol > 0 else 1.0
             
-            # 陽線かつ（上抜け or GC）の場合のみ倍率適用
+            # 陽線 かつ（上抜け or GC）の場合のみ倍率適用
             if is_yang and (is_breakout or gc_detected):
                 if vol_ratio >= 3.0: multiplier = 3.0
                 elif vol_ratio >= 2.0: multiplier = 2.0
-                if is_breakout: d_l.append("高値上抜け(適用)")
             else:
                 if vol_ratio >= 2.0: d_l.append("出来高増(条件未達成により無効)")
         
-        # 下落トレンドでの出来高増（逆行）をデバフ
+        # 必須条件デバフ
         if curr['close'] < curr['ma25'] and multiplier > 1.0:
             multiplier = 1.0
-            d_l.append("下落中の出来高増(除外)")
+            d_l.append("下落中につき倍率除外")
 
-        # 過熱警戒デバフ（+2σ超えで倍率減衰）
         if curr['close'] > curr['bbh'] and multiplier > 1.0:
             multiplier -= 0.5; d_l.append("過熱警戒(降格)")
         
