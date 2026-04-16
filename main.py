@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import io
 from scipy.signal import argrelextrema
+import re
 
 # --- 認証設定 ---
 API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
@@ -12,11 +13,9 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def normalize_code(raw_code):
-    """コード統一（4桁抽出を徹底）"""
+    """コード統一"""
     s = str(raw_code).strip()
     if s.endswith('.0'): s = s[:-2]
-    # 数字以外の混入や5桁(J-Quants)を4桁に強制
-    import re
     m = re.search(r'\d{4}', s)
     return m.group(0) if m else s.zfill(4)[:4]
 
@@ -38,23 +37,24 @@ def calculate_indicators(df):
     return df
 
 def detect_up_patterns(prices):
-    """形状検知（加点を大幅に強化して最優先にする）"""
+    """形状検知（デバッグログ付き）"""
     res = {'score': 0, 'desc': []}
     if len(prices) < 30: return res
     
-    troughs = argrelextrema(prices, np.less_equal, order=5)[0]
-    peaks = argrelextrema(prices, np.greater_equal, order=5)[0]
+    # 判定を少し緩める (order=3)
+    troughs = argrelextrema(prices, np.less_equal, order=3)[0]
+    peaks = argrelextrema(prices, np.greater_equal, order=3)[0]
 
-    # ダブルボトム（配点を跳ね上げ）
+    # ダブルボトム
     if len(troughs) >= 2:
         t1, t2 = prices[troughs[-2]], prices[troughs[-1]]
-        if abs(t1 - t2) / t1 < 0.02:
+        if abs(t1 - t2) / t1 < 0.03: # 3%まで緩和
             res['score'] += 150; res['desc'].append("★ダブルボトム(+150)")
             
-    # 逆三尊（最優先）
+    # 逆三尊
     if len(troughs) >= 3:
         t1, t2, t3 = prices[troughs[-3]], prices[troughs[-2]], prices[troughs[-1]]
-        if t2 < t1 and t2 < t3 and abs(t1 - t3) / t1 < 0.04:
+        if t2 < t1 and t2 < t3 and abs(t1 - t3) / t1 < 0.05:
             res['score'] += 200; res['desc'].append("★逆三尊(+200)")
             
     # 三角保合い
@@ -65,16 +65,16 @@ def detect_up_patterns(prices):
     # ソーサーボトム
     p_win = prices[-20:]
     if len(p_win) == 20:
-        c_min = p_win[7:13].min()
-        if p_win.min() == c_min and p_win[0] > c_min and p_win[-1] > c_min:
+        c_min = p_win.min()
+        if p_win[7:13].min() == c_min:
             res['score'] += 120; res['desc'].append("★ソーサーボトム(+120)")
+            
     return res
 
 def get_stock_report():
     """メイン処理"""
     host, headers = "https://api.jquants.com/v2", {"x-api-key": API_KEY}
     
-    # 1. 名簿取得（紐付け精度向上）
     name_map = {}
     try:
         csv_res = requests.get("https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv", timeout=10)
@@ -85,9 +85,9 @@ def get_stock_report():
             name_map[code] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
     except: pass
 
-    # 2. 株価取得
     all_prices, success_days = [], 0
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(40)]
+    # 形状精度のため少し長めに取得 (60日)
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(60)]
     for d in reversed(dates):
         r = requests.get(f"{host}/equities/bars/daily", headers=headers, params={"date": d})
         if r.status_code == 200:
@@ -111,7 +111,7 @@ def get_stock_report():
         prev, curr = df.iloc[-2], df.iloc[-1]
         u_s, d_l = 0, []
         
-        # 指標加点（据え置き）
+        # 指標判定
         if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; d_l.append("GC発生(+20)")
         if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; d_l.append("BB下限反発(+15)")
         if curr['volume'] > curr['vol_avg'] * 2: u_s += 20; d_l.append("出来高2倍超(+20)")
@@ -122,12 +122,13 @@ def get_stock_report():
         change = ((curr['close'] - prev['close']) / prev['close']) * 100 if prev['close'] > 0 else 0
         if change > 3: u_s += 15; d_l.append(f"急騰 {change:.1f}%(+15)")
         
-        # 形状加点（超強化）
+        # 形状判定
         p = detect_up_patterns(df['close'].values)
-        u_s += p['score']
-        d_l.extend(p['desc'])
+        if p['score'] > 0:
+            print(f"DEBUG: 形状ヒット -> {s_code} {p['desc']}")
+            u_s += p['score']
+            d_l.extend(p['desc'])
         
-        # 判定
         if u_s >= 50:
             msg_part = f"{s_code} {info['name']} ({info['sector']})\n{int(curr['close'])}円 【{u_s}点】\n" + "・".join(d_l)
             up_res.append((u_s, msg_part))
@@ -141,7 +142,4 @@ if __name__ == "__main__":
         msg = f"{today}　株価評価レポート\n（データ取得日数：{count}）\n\n"
         msg += "【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(up)
         msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate/?_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&burl=iris_top&cat1=market&cat2=top&dir=tl1-top%7Ctl2-map%7Ctl5-jpn&file=index.html&getFlg=on&OutSide=on"
-        
-        requests.post("https://api.line.me/v2/bot/message/push", 
-                      headers={"Authorization": f"Bearer {LINE_TOKEN}"}, 
-                      json={"to": USER_ID, "messages": [{"type": "text", "text": msg[:5000]}]})
+        requests.post("https://api.line.me/v2/bot/message/push", headers={"Authorization": f"Bearer {LINE_TOKEN}"}, json={"to": USER_ID, "messages": [{"type": "text", "text": msg[:5000]}]})
