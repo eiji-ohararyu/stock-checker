@@ -10,19 +10,6 @@ API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
-def clean_code_str(raw_val):
-    """
-    【不純物の分離】
-    どのような型や形式でも、余計な文字を削ぎ落として
-    『5桁の数字のみの文字列』に統一する。
-    """
-    s = str(raw_val).strip().split('.')[0]
-    if not s.isdigit():
-        return ""
-    if len(s) == 4:
-        s += "0"
-    return s
-
 def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
@@ -44,37 +31,26 @@ def calculate_score(df, info, code_str):
     u_s, d_s = 0, 0
     u_d, d_d = [], []
 
-    # 1. 移動平均線クロス (短期 vs 中期)
     if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; u_d.append("GC発生(+20)")
     elif prev['ma5'] > prev['ma25'] and curr['ma5'] < prev['ma25']: d_s += 20; d_d.append("DC発生(+20)")
-    
-    # 2. ボリンジャーバンド反発
     if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; u_d.append("BB下限反発(+15)")
     elif curr['close'] < curr['bbu'] and prev['close'] >= curr['bbu']: d_s += 15; d_d.append("BB上限反落(+15)")
-    
-    # 3. RSI
     if not np.isnan(curr['rsi']):
         if curr['rsi'] > prev['rsi'] and prev['rsi'] < 35: u_s += 15; u_d.append("RSI底打ち(+15)")
         elif curr['rsi'] < prev['rsi'] and prev['rsi'] > 65: d_s += 15; d_d.append("RSI天井打ち(+15)")
     
-    # 4. 急騰落判定
     change = ((curr['close'] - prev['close']) / prev['close']) * 100 if prev['close'] > 0 else 0
     if change > 3: u_s += 15; u_d.append(f"急騰 {change:.1f}%(+15)")
     elif change < -3: d_s += 15; d_d.append(f"急落 {change:.1f}%(+15)")
     
-    # 5. 出来高
     if curr['vol_avg'] > 0 and (curr['volume'] / curr['vol_avg']) > 2:
         u_s += 20; d_s += 20; u_d.append("出来高2倍超(+20)"); d_d.append("出来高2倍超(+20)")
-
-    # 6. 中期トレンド判定（25日線の傾き）
-    if not np.isnan(prev['ma25']) and not np.isnan(curr['ma25']):
-        if curr['ma25'] > prev['ma25']:
-            u_s += 15; u_d.append("25日線上向き(+15)")
-        elif curr['ma25'] < prev['ma25']:
-            d_s += 15; d_d.append("25日線下向き(+15)")
+    if curr['volume'] > prev['volume']: u_s += 5; d_s += 5
+    if curr['ma25'] > prev['ma25']: u_s += 10; u_d.append("25日線上向き(+10)")
+    else: d_s += 10; d_d.append("25日線下向き(+10)")
 
     cur_p = int(curr['close']) if not np.isnan(curr['close']) else 0
-    header = f"{code_str[:4]} {info['name']} ({info['sector']})\n{cur_p}円"
+    header = f"{code_str} {info['name']} ({info['sector']})\n{cur_p}円"
     return u_s, f"{header} 【{u_s}点】\n" + "・".join(u_d), d_s, f"{header} 【{d_s}点】\n" + "・".join(d_d)
 
 def get_stock_data():
@@ -82,16 +58,28 @@ def get_stock_data():
     headers = {"x-api-key": API_KEY}
     name_map = {}
     
+    # 銘柄情報の取得とデバッグ表示
     try:
         csv_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
         res = requests.get(csv_url, timeout=10)
         res.encoding = 'shift_jis'
         csv_df = pd.read_csv(io.StringIO(res.text))
+        csv_df.columns = csv_df.columns.str.strip()
+        
         for _, row in csv_df.iterrows():
-            c_key = clean_code_str(row.get('コード', ''))
-            if c_key:
-                name_map[c_key] = {"name": str(row.get('銘柄名', '不明')).strip(), "sector": str(row.get('17業種区分', '-')).strip()}
-    except: pass
+            c_val = str(row['コード']).strip()
+            if len(c_val) >= 4:
+                name_map[c_val[:4]] = {
+                    "name": str(row['銘柄名']).strip(),
+                    "sector": str(row['17業種区分']).strip()
+                }
+        print(f"DEBUG: name_map created. Count: {len(name_map)}")
+        # サンプル表示
+        sample_keys = list(name_map.keys())[:3]
+        for k in sample_keys:
+            print(f"DEBUG: Sample Map -> {k}: {name_map[k]['name']}")
+    except Exception as e:
+        print(f"DEBUG: CSV Error: {e}")
 
     all_data, success_days = [], 0
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(35)]
@@ -103,21 +91,41 @@ def get_stock_data():
                 all_data.extend(day_data)
                 success_days += 1
     
-    if not all_data: return "0", [], []
+    if not all_data:
+        print("DEBUG: No daily data fetched from J-Quants.")
+        return "0", [], []
+        
     df = pd.DataFrame(all_data).sort_values(['Code', 'Date'])
     up_list, down_list = [], []
     
+    print(f"DEBUG: Unique Codes in Daily Data: {len(df['Code'].unique())}")
+    
     for code, group in df.groupby('Code'):
         if len(group) < 10: continue
-        s_code_5 = clean_code_str(code)
-        info = name_map.get(s_code_5, {"name": "銘柄不明", "sector": "-"})
-        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code_5)
+        
+        # 変換過程をデバッグ
+        try:
+            raw_code = str(code).strip()
+            s_code = raw_code[:4]
+            # 最初の一件だけ詳細表示
+            if code == df['Code'].unique()[0]:
+                print(f"DEBUG: Code Mapping Check -> Raw: {code}, Converted: {s_code}")
+        except:
+            s_code = str(code)[:4]
+
+        info = name_map.get(s_code)
+        if info is None:
+            # 紐付け失敗時のデバッグ
+            if len(up_list) < 1: 
+                print(f"DEBUG: Mapping Failed for Code: {s_code}")
+            info = {"name": "銘柄不明", "sector": "-"}
+            
+        u_s, u_m, d_s, d_m = calculate_score(group.copy(), info, s_code)
         if u_s > 0: up_list.append((u_s, u_m))
         if d_s > 0: down_list.append((d_s, d_m))
 
-    return str(success_days), \
-           [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]], \
-           [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:5]]
+    return str(success_days), [x[1] for x in sorted(up_list, key=lambda x: x[0], reverse=True)[:10]], \
+           [x[1] for x in sorted(down_list, key=lambda x: x[0], reverse=True)[:10]]
 
 def notify_line(msg):
     requests.post("https://api.line.me/v2/bot/message/push", 
@@ -131,7 +139,7 @@ if __name__ == "__main__":
     if up: msg += "【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(up)
     if down:
         if up: msg += "\n\n───────────────\n\n"
-        msg += "【判定：下落注意 TOP5】\n\n" + "\n\n".join(down)
+        msg += "【判定：下落優勢TOP10】\n\n" + "\n\n".join(down)
     
     if up or down:
         msg += "\n\n───────────────\n詳細確認（SBI証券）:\nhttps://www.sbisec.co.jp/ETGate/?_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&burl=iris_top&cat1=market&cat2=top&dir=tl1-top%7Ctl2-map%7Ctl5-jpn&file=index.html&getFlg=on&OutSide=on"
