@@ -20,10 +20,12 @@ def normalize_code(raw_code):
 
 def calculate_indicators(df):
     """テクニカル指標算出"""
+    df['open'] = pd.to_numeric(df['O'], errors='coerce')
+    df['high'] = pd.to_numeric(df['H'], errors='coerce')
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     df = df.dropna(subset=['close']).reset_index(drop=True)
-    if len(df) < 30: return None
+    if len(df) < 30: return df
     
     # 移動平均
     df['ma5'] = df['close'].rolling(5).mean()
@@ -32,6 +34,9 @@ def calculate_indicators(df):
     # 出来高平均（短期2日 / 中期10日）
     df['vol_avg_short'] = df['volume'].rolling(2).mean()
     df['vol_avg_mid'] = df['volume'].rolling(10).mean()
+    
+    # 直近10日間の最高値（上抜け判定用）
+    df['high_10d'] = df['high'].shift(1).rolling(10).max()
     
     # ボリンジャーバンド（過熱判定用）
     df['bbm'] = df['close'].rolling(20).mean()
@@ -46,7 +51,7 @@ def detect_up_patterns(prices):
     if len(prices) < 40: return res
     
     t_idx = argrelextrema(prices, np.less_equal, order=5)[0]
-    p_idx = argrelextrema(prices, np.greater_equal, order=5)[:20] # 演算負荷軽減
+    p_idx_all = argrelextrema(prices, np.greater_equal, order=5)[0]
     
     valid_troughs = []
     for i in t_idx:
@@ -67,7 +72,6 @@ def detect_up_patterns(prices):
         res['score'] += 35; res['desc'].append("ソーサーボトム(+35)")
 
     # 三角保合い
-    p_idx_all = argrelextrema(prices, np.greater_equal, order=5)[0]
     if len(p_idx_all) >= 2 and len(valid_troughs) >= 2:
         if prices[p_idx_all[-2]] > prices[p_idx_all[-1]] and prices[valid_troughs[-2]] < prices[valid_troughs[-1]]:
             res['score'] += 25; res['desc'].append("三角保合い(+25)")
@@ -113,12 +117,18 @@ def get_stock_report():
         curr = df.iloc[-1]
         raw_s, d_l = 0, []
         
+        # 陽線判定
+        is_yang = curr['close'] > curr['open']
+        # 直近高値の上抜け判定
+        is_breakout = curr['close'] > curr['high_10d']
+        
         # --- 1. GC判定 ---
         gc_detected = False
         for i in range(len(df)-3, len(df)):
             if i <= 0: continue
             # MA5がMA25を上抜けた瞬間、かつMA25が下げ止まっている
             if df['ma5'].iloc[i-1] <= df['ma25'].iloc[i-1] and df['ma5'].iloc[i] > df['ma25'].iloc[i]:
+                # 中期線が下げ止まっており、かつ株価が中期線の上にあること
                 if df['ma25'].iloc[i] >= df['ma25'].iloc[i-1] and curr['close'] > df['ma25'].iloc[i]:
                     gc_detected = True; break
         if gc_detected: raw_s += 25; d_l.append("GC初動(+25)")
@@ -141,8 +151,14 @@ def get_stock_report():
         vol_ratio = curr['vol_avg_short'] / base_vol if base_vol > 0 else 1.0
         
         multiplier = 1.0
-        if vol_ratio >= 3.0: multiplier = 3.0
-        elif vol_ratio >= 2.0: multiplier = 2.0
+        # 陽線かつ（上抜け or GC）の場合のみ出来高倍率を適用
+        if is_yang and (is_breakout or gc_detected):
+            if vol_ratio >= 3.0: multiplier = 3.0
+            elif vol_ratio >= 2.0: multiplier = 2.0
+            
+            if is_breakout: d_l.append("高値上抜け(適用)")
+        else:
+            if vol_ratio >= 2.0: d_l.append("出来高増(条件未達成により無効)")
         
         # 下落トレンドでの出来高増（逆行）をデバフ
         if curr['close'] < curr['ma25'] and multiplier > 1.0:
