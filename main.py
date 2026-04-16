@@ -23,7 +23,7 @@ def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     df = df.dropna(subset=['close']).reset_index(drop=True)
-    if len(df) < 30: return df
+    if len(df) < 30: return None
     
     # 移動平均
     df['ma5'] = df['close'].rolling(5).mean()
@@ -46,7 +46,7 @@ def detect_up_patterns(prices):
     if len(prices) < 40: return res
     
     t_idx = argrelextrema(prices, np.less_equal, order=5)[0]
-    p_idx = argrelextrema(prices, np.greater_equal, order=5)[0]
+    p_idx = argrelextrema(prices, np.greater_equal, order=5)[:20] # 演算負荷軽減
     
     valid_troughs = []
     for i in t_idx:
@@ -67,8 +67,9 @@ def detect_up_patterns(prices):
         res['score'] += 35; res['desc'].append("ソーサーボトム(+35)")
 
     # 三角保合い
-    if len(p_idx) >= 2 and len(valid_troughs) >= 2:
-        if prices[p_idx[-2]] > prices[p_idx[-1]] and prices[valid_troughs[-2]] < prices[valid_troughs[-1]]:
+    p_idx_all = argrelextrema(prices, np.greater_equal, order=5)[0]
+    if len(p_idx_all) >= 2 and len(valid_troughs) >= 2:
+        if prices[p_idx_all[-2]] > prices[p_idx_all[-1]] and prices[valid_troughs[-2]] < prices[valid_troughs[-1]]:
             res['score'] += 25; res['desc'].append("三角保合い(+25)")
     return res
 
@@ -105,7 +106,9 @@ def get_stock_report():
         s_code = normalize_code(code)
         info = name_map.get(s_code, {"name": "不明", "sector": "不明"})
         df = calculate_indicators(group.copy())
-        if len(df) < 30 or df['volume'].iloc[-1] < 100000: continue
+        
+        # 必須条件：データ不足または流動性不足（10万株未満）の足切り
+        if df is None or df['volume'].iloc[-1] < 100000: continue
         
         curr = df.iloc[-1]
         raw_s, d_l = 0, []
@@ -116,7 +119,7 @@ def get_stock_report():
             if i <= 0: continue
             # MA5がMA25を上抜けた瞬間、かつMA25が下げ止まっている
             if df['ma5'].iloc[i-1] <= df['ma25'].iloc[i-1] and df['ma5'].iloc[i] > df['ma25'].iloc[i]:
-                if df['ma25'].iloc[i] >= df['ma25'].iloc[i-1]:
+                if df['ma25'].iloc[i] >= df['ma25'].iloc[i-1] and curr['close'] > df['ma25'].iloc[i]:
                     gc_detected = True; break
         if gc_detected: raw_s += 25; d_l.append("GC初動(+25)")
 
@@ -138,11 +141,14 @@ def get_stock_report():
         vol_ratio = curr['vol_avg_short'] / base_vol if base_vol > 0 else 1.0
         
         multiplier = 1.0
-        if vol_ratio >= 5.0: multiplier = 5.0
-        elif vol_ratio >= 4.0: multiplier = 4.0
-        elif vol_ratio >= 3.0: multiplier = 3.0
+        if vol_ratio >= 3.0: multiplier = 3.0
         elif vol_ratio >= 2.0: multiplier = 2.0
         
+        # 下落トレンドでの出来高増（逆行）をデバフ
+        if curr['close'] < curr['ma25'] and multiplier > 1.0:
+            multiplier = 1.0
+            d_l.append("下落中の出来高増(除外)")
+
         # 過熱警戒デバフ（+2σ超えで倍率減衰）
         if curr['close'] > curr['bbh'] and multiplier > 1.0:
             multiplier -= 0.5; d_l.append("過熱警戒(降格)")
