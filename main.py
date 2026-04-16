@@ -12,11 +12,13 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 def normalize_code(raw_code):
-    """コード統一（完全版）"""
+    """コード統一（4桁抽出を徹底）"""
     s = str(raw_code).strip()
     if s.endswith('.0'): s = s[:-2]
-    if len(s) > 4: s = s[:4]
-    return s.zfill(4)
+    # 数字以外の混入や5桁(J-Quants)を4桁に強制
+    import re
+    m = re.search(r'\d{4}', s)
+    return m.group(0) if m else s.zfill(4)[:4]
 
 def calculate_indicators(df):
     """テクニカル指標算出"""
@@ -36,41 +38,43 @@ def calculate_indicators(df):
     return df
 
 def detect_up_patterns(prices):
-    """形状検知（山谷スキャン）"""
+    """形状検知（加点を大幅に強化して最優先にする）"""
     res = {'score': 0, 'desc': []}
     if len(prices) < 30: return res
     
-    # 判定範囲を広めに設定（order=5）
     troughs = argrelextrema(prices, np.less_equal, order=5)[0]
     peaks = argrelextrema(prices, np.greater_equal, order=5)[0]
 
-    # ダブルボトム
+    # ダブルボトム（配点を跳ね上げ）
     if len(troughs) >= 2:
         t1, t2 = prices[troughs[-2]], prices[troughs[-1]]
         if abs(t1 - t2) / t1 < 0.02:
-            res['score'] += 40; res['desc'].append("ダブルボトム(+40)")
-    # 逆三尊
+            res['score'] += 150; res['desc'].append("★ダブルボトム(+150)")
+            
+    # 逆三尊（最優先）
     if len(troughs) >= 3:
         t1, t2, t3 = prices[troughs[-3]], prices[troughs[-2]], prices[troughs[-1]]
         if t2 < t1 and t2 < t3 and abs(t1 - t3) / t1 < 0.04:
-            res['score'] += 50; res['desc'].append("逆三尊(+50)")
+            res['score'] += 200; res['desc'].append("★逆三尊(+200)")
+            
     # 三角保合い
     if len(peaks) >= 2 and len(troughs) >= 2:
         if prices[peaks[-2]] > prices[peaks[-1]] and prices[troughs[-2]] < prices[troughs[-1]]:
-            res['score'] += 25; res['desc'].append("三角保合い(+25)")
+            res['score'] += 100; res['desc'].append("★三角保合い(+100)")
+            
     # ソーサーボトム
     p_win = prices[-20:]
     if len(p_win) == 20:
         c_min = p_win[7:13].min()
         if p_win.min() == c_min and p_win[0] > c_min and p_win[-1] > c_min:
-            res['score'] += 35; res['desc'].append("ソーサーボトム(+35)")
+            res['score'] += 120; res['desc'].append("★ソーサーボトム(+120)")
     return res
 
 def get_stock_report():
     """メイン処理"""
     host, headers = "https://api.jquants.com/v2", {"x-api-key": API_KEY}
     
-    # 1. 銘柄名マスタ取得（紐付け精度向上）
+    # 1. 名簿取得（紐付け精度向上）
     name_map = {}
     try:
         csv_res = requests.get("https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv", timeout=10)
@@ -79,8 +83,7 @@ def get_stock_report():
         for _, row in csv_df.iterrows():
             code = normalize_code(row['コード'])
             name_map[code] = {"name": str(row['銘柄名']).strip(), "sector": str(row['17業種区分']).strip()}
-    except Exception as e:
-        print(f"Master CSV Error: {e}")
+    except: pass
 
     # 2. 株価取得
     all_prices, success_days = [], 0
@@ -97,7 +100,6 @@ def get_stock_report():
     
     full_df = pd.DataFrame(all_prices).sort_values(['Code', 'Date'])
     up_res = []
-    pattern_count = 0 # デバッグ用
     
     for code, group in full_df.groupby('Code'):
         s_code = normalize_code(code)
@@ -109,7 +111,7 @@ def get_stock_report():
         prev, curr = df.iloc[-2], df.iloc[-1]
         u_s, d_l = 0, []
         
-        # 指標加点
+        # 指標加点（据え置き）
         if prev['ma5'] < prev['ma25'] and curr['ma5'] > curr['ma25']: u_s += 20; d_l.append("GC発生(+20)")
         if curr['close'] > curr['bbl'] and prev['close'] <= prev['bbl']: u_s += 15; d_l.append("BB下限反発(+15)")
         if curr['volume'] > curr['vol_avg'] * 2: u_s += 20; d_l.append("出来高2倍超(+20)")
@@ -120,18 +122,16 @@ def get_stock_report():
         change = ((curr['close'] - prev['close']) / prev['close']) * 100 if prev['close'] > 0 else 0
         if change > 3: u_s += 15; d_l.append(f"急騰 {change:.1f}%(+15)")
         
-        # 形状加点
+        # 形状加点（超強化）
         p = detect_up_patterns(df['close'].values)
-        if p['score'] > 0:
-            u_s += p['score']
-            d_l.extend(p['desc'])
-            pattern_count += 1 # 形状検知が動いた数をカウント
+        u_s += p['score']
+        d_l.extend(p['desc'])
         
+        # 判定
         if u_s >= 50:
             msg_part = f"{s_code} {info['name']} ({info['sector']})\n{int(curr['close'])}円 【{u_s}点】\n" + "・".join(d_l)
             up_res.append((u_s, msg_part))
             
-    print(f"形状検知がヒットした全銘柄数: {pattern_count}")
     return success_days, [x[1] for x in sorted(up_res, key=lambda x:x[0], reverse=True)[:10]]
 
 if __name__ == "__main__":
