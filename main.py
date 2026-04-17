@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import io
 import re
+from scipy.signal import argrelextrema
 
 # --- 認証設定 ---
 API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
@@ -17,16 +18,23 @@ def normalize_code(raw_code):
     return m.group(0) if m else s.zfill(4)[:4]
 
 def get_latest_topix100():
-    """JPXから最新のTOPIX100リストを自動取得"""
+    """JPX公式サイトから最新のTOPIX100銘柄リストを取得（接続設定を強化）"""
     url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.csv"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     try:
-        r = requests.get(url, timeout=15)
+        # タイムアウトを30秒に延長
+        r = requests.get(url, headers=headers, timeout=30)
         r.encoding = 'shift_jis'
-        df = pd.read_csv(io.StringIO(r.text))
-        topix100 = df[df['規模区分'] == 'TOPIX100']
-        codes = [normalize_code(c) for c in topix100['コード']]
-        names = {normalize_code(row['コード']): row['銘柄名'] for _, row in topix100.iterrows()}
-        return codes, names
+        if r.status_code == 200:
+            df = pd.read_csv(io.StringIO(r.text))
+            topix100 = df[df['規模区分'] == 'TOPIX100']
+            codes = [normalize_code(c) for c in topix100['コード']]
+            names = {normalize_code(row['コード']): row['銘柄名'] for _, row in topix100.iterrows()}
+            return codes, names
+        else:
+            return [], {}
     except Exception:
         return [], {}
 
@@ -36,12 +44,12 @@ def calculate_indicators(df):
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     df = df.dropna(subset=['close']).reset_index(drop=True)
-    if len(df) < 30: return None
+    if len(df) < 40: return None
     
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma25'] = df['close'].rolling(25).mean()
-    df['vol_avg_short'] = df['volume'].rolling(2).mean() # 直近2日平均
-    df['vol_avg_mid'] = df['volume'].rolling(10).mean() # 10日平均
+    df['vol_avg_short'] = df['volume'].rolling(2).mean() 
+    df['vol_avg_mid'] = df['volume'].rolling(10).mean()
     df['high_10d'] = df['high'].shift(1).rolling(10).max()
     
     df['std'] = df['close'].rolling(20).std()
@@ -49,13 +57,27 @@ def calculate_indicators(df):
     
     return df
 
+def detect_bottom_pattern(prices):
+    res = {'score': 0, 'desc': []}
+    t_idx = argrelextrema(prices, np.less_equal, order=5)[0]
+    valid_troughs = []
+    for i in t_idx:
+        lookback = prices[max(0, i-10):i]
+        if len(lookback) > 0 and (lookback.max() - prices[i]) / lookback.max() > 0.03:
+            valid_troughs.append(i)
+    if len(valid_troughs) >= 2:
+        idx1, idx2 = valid_troughs[-2], valid_troughs[-1]
+        if (idx2 - idx1) >= 7 and abs(prices[idx1] - prices[idx2]) / prices[idx1] < 0.02:
+            res['score'] += 20; res['desc'].append("ダブルボトム(+20)")
+    return res
+
 def get_stock_report():
     target_codes, name_map = get_latest_topix100()
-    if not target_codes: return 0, ["銘柄リスト取得失敗"]
+    if not target_codes: return 0, ["リスト取得失敗"]
 
     host, headers = "https://api.jquants.com/v2", {"x-api-key": API_KEY}
     all_prices = []
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(50)]
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(60)]
     
     for d in reversed(dates):
         r = requests.get(f"{host}/equities/bars/daily", headers=headers, params={"date": d})
@@ -77,19 +99,30 @@ def get_stock_report():
         curr = df.iloc[-1]
         raw_s, d_l = 0, []
         
-        # 1. 陽線判定
+        # 1. 陽線
         is_yang = curr['close'] > curr['open']
-        if is_yang: raw_s += 20; d_l.append("陽線")
+        if is_yang: raw_s += 15; d_l.append("陽線(+15)")
         
-        # 2. トレンド判定
-        if curr['close'] > curr['ma25'] and df['ma25'].diff().iloc[-1] > 0:
-            raw_s += 20; d_l.append("MA25上保持")
+        # 2. GC判定
+        gc_detected = False
+        for i in range(len(df)-3, len(df)):
+            if i <= 0: continue
+            if df['ma5'].iloc[i-1] <= df['ma25'].iloc[i-1] and df['ma5'].iloc[i] > df['ma25'].iloc[i]:
+                if df['ma25'].iloc[i] >= df['ma25'].iloc[i-1]:
+                    gc_detected = True; break
+        if gc_detected: raw_s += 20; d_l.append("GC初動(+20)")
 
-        # 3. 高値突破
+        # 3. トレンド/高値突破
+        if df['ma25'].diff().iloc[-3:].min() > 0:
+            raw_s += 25; d_l.append("MA25上昇(+25)")
         if curr['close'] > curr['high_10d']:
-            raw_s += 20; d_l.append("高値突破")
+            raw_s += 20; d_l.append("高値突破(+20)")
 
-        # 出来高倍率（直近2日平均ベース ＆ マイルド設定）
+        # 4. ダブルボトム
+        p = detect_bottom_pattern(df['close'].values)
+        raw_s += p['score']; d_l.extend(p['desc'])
+
+        # 5. 出来高倍率（直近2日平均 / マイルド設定）
         multiplier = 1.0
         if len(df) >= 13:
             base_vol = df['vol_avg_mid'].iloc[-3]
@@ -102,7 +135,7 @@ def get_stock_report():
             multiplier *= 0.7; d_l.append("過熱警戒")
 
         final_s = int(raw_s * multiplier)
-        if final_s >= 30:
+        if final_s >= 40:
             if multiplier > 1.0: d_l.append(f"出来高x{multiplier}")
             name = name_map.get(s_code, "不明")
             up_res.append((final_s, f"{s_code} {name}\n{int(curr['close'])}円 【{final_s}点】\n" + "・".join(d_l)))
