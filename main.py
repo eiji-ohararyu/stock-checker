@@ -13,7 +13,6 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 # --- 主要3指数統合リスト（TOPIX100 / 日経225 / JPX150） ---
-# 銘柄名と業種をすべてベタ書きで保持（JPXサーバーのダウン対策）
 STOCKS_DATA = {
     "1332": ("ニッスイ", "水産・農林業"), "1605": ("INPEX", "鉱業"), "1721": ("コムシスHD", "建設業"),
     "1801": ("大成建", "建設業"), "1802": ("大林組", "建設業"), "1803": ("清水建", "建設業"),
@@ -116,10 +115,9 @@ def calculate_indicators(df):
     
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma25'] = df['close'].rolling(25).mean()
-    df['vol_avg_short'] = df['volume'].rolling(2).mean() # 直近2日平均
-    df['vol_avg_mid'] = df['volume'].rolling(10).mean() # 中期10日平均
+    # 出来高：単日（当日）を基準に修正
+    df['vol_avg_mid'] = df['volume'].rolling(10).mean()
     df['high_10d'] = df['high'].shift(1).rolling(10).max()
-    
     df['std'] = df['close'].rolling(20).std()
     df['bbh'] = df['close'].rolling(20).mean() + (df['std'] * 2)
     return df
@@ -164,12 +162,10 @@ def get_stock_report():
         
         curr = df.iloc[-1]
         raw_s, d_l = 0, []
-        
-        # 1. 陽線
         is_yang = curr['close'] > curr['open']
+        
         if is_yang: raw_s += 15; d_l.append("陽線(+15)")
         
-        # 2. GC判定
         gc_detected = False
         for i in range(len(df)-3, len(df)):
             if i <= 0: continue
@@ -178,19 +174,17 @@ def get_stock_report():
                     gc_detected = True; break
         if gc_detected: raw_s += 20; d_l.append("GC初動(+20)")
 
-        # 3. トレンド/高値突破
         if df['ma25'].diff().iloc[-3:].min() > 0: raw_s += 25; d_l.append("MA25上昇(+25)")
         if curr['close'] > curr['high_10d']: raw_s += 20; d_l.append("高値突破(+20)")
 
-        # 4. ダブルボトム
         p = detect_bottom_pattern(df['close'].values)
         raw_s += p['score']; d_l.extend(p['desc'])
 
-        # 5. 出来高倍率（直近2日平均ベース）
+        # 出来高倍率判定（単日ベースに変更）
         multiplier = 1.0
         if len(df) >= 13:
             base_vol = df['vol_avg_mid'].iloc[-3]
-            vol_ratio = curr['vol_avg_short'] / base_vol if base_vol > 0 else 1.0
+            vol_ratio = curr['volume'] / base_vol if base_vol > 0 else 1.0
             if is_yang:
                 if vol_ratio >= 2.0: multiplier = 2.0
                 elif vol_ratio >= 1.5: multiplier = 1.5
@@ -200,7 +194,12 @@ def get_stock_report():
         final_score = int(raw_s * multiplier)
         if final_score >= 40:
             name, sector = STOCKS_DATA[s_code]
-            up_res.append((final_score, f"{s_code} {name} ({sector})\n{int(curr['close'])}円 【{final_score}点】\n" + "・".join(d_l)))
+            # 価格表示を小数点第一位までに固定 (.0表示)
+            price_str = f"{curr['close']:.1f}"
+            v_ratio_str = f"{vol_ratio:.2f}"
+            if multiplier > 1.0: d_l.append(f"出来高x{v_ratio_str}")
+            
+            up_res.append((final_score, f"{s_code} {name} ({sector})\n{price_str}円 【{final_score}点】\n" + "・".join(d_l)))
             
     return success_days, [x[1] for x in sorted(up_res, key=lambda x:x[0], reverse=True)[:10]]
 
