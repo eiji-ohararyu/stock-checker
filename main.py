@@ -4,15 +4,15 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import re
-from scipy.signal import argrelextrema
 
 # --- 認証設定 ---
 API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
-# --- 主要株データ ---
-MAJOR_STOCKS = {
+# --- 主要3指数統合リスト（TOPIX100 / 日経225 / JPX150） ---
+# 銘柄名と業種をすべてベタ書きで保持（JPXサーバーのダウン対策）
+STOCKS_DATA = {
     "1332": ("ニッスイ", "水産・農林業"), "1605": ("INPEX", "鉱業"), "1721": ("コムシスHD", "建設業"),
     "1801": ("大成建", "建設業"), "1802": ("大林組", "建設業"), "1803": ("清水建", "建設業"),
     "1808": ("長谷工", "建設業"), "1812": ("鹿島", "建設業"), "1925": ("大和ハウス", "建設業"),
@@ -106,83 +106,54 @@ def normalize_code(raw_code):
 
 def calculate_indicators(df):
     df['open'] = pd.to_numeric(df['O'], errors='coerce')
-    df['high'] = pd.to_numeric(df['H'], errors='coerce')
     df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
     df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
     df = df.dropna(subset=['close']).reset_index(drop=True)
-    if len(df) < 40: return None
-    
+    if len(df) < 30: return None
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma25'] = df['close'].rolling(25).mean()
-    df['high_10d'] = df['high'].shift(1).rolling(10).max()
-    df['std'] = df['close'].rolling(20).std()
-    df['bbh'] = df['close'].rolling(20).mean() + (df['std'] * 2)
+    # 高値判定
+    df['high_10d'] = pd.to_numeric(df['H'], errors='coerce').shift(1).rolling(10).max()
+    # 過熱感判定用
+    df['bbh'] = df['close'].rolling(20).mean() + (df['close'].rolling(20).std() * 2)
     return df
-
-def detect_strict_bottom(prices):
-    """ダブルボトム判定の厳格化"""
-    res = {'score': 0, 'desc': []}
-    t_idx = argrelextrema(prices, np.less_equal, order=10)[0]
-    if len(t_idx) >= 2:
-        idx1, idx2 = t_idx[-2], t_idx[-1]
-        p1, p2 = prices[idx1], prices[idx2]
-        # 谷の間のネックライン（山）を確認
-        peak = prices[idx1:idx2].max()
-        if (peak - p1) / p1 > 0.04: 
-            if abs(p1 - p2) / p1 < 0.02 or p2 > p1:
-                if (idx2 - idx1) >= 12:
-                    res['score'] = 40; res['desc'].append("ダブルボトム(+40)")
-    return res
-
-def send_line(msg):
-    requests.post("https://api.line.me/v2/bot/message/push", 
-                  headers={"Authorization": f"Bearer {LINE_TOKEN}"}, 
-                  json={"to": USER_ID, "messages": [{"type": "text", "text": msg}]})
 
 def run_scan(target_codes, full_df, master_info):
     up_res = []
     for code, group in full_df.groupby('Code'):
         s_code = normalize_code(code)
         if target_codes and s_code not in target_codes: continue
-            
+        
         df = calculate_indicators(group.copy())
         if df is None: continue
         
         curr = df.iloc[-1]
         raw_s, d_l = 0, []
-        is_yang = curr['close'] > curr['open']
         
+        is_yang = curr['close'] > curr['open']
         if is_yang: raw_s += 15; d_l.append("陽線(+15)")
         
-        # --- GC判定（物理的交差の事実のみ確認） ---
+        # GC判定（直近3日以内の物理的な交差事実のみを確認）
         gc_found = False
         for i in range(len(df)-3, len(df)):
-            prev_row, curr_row = df.iloc[i-1], df.iloc[i]
-            if prev_row['ma5'] <= prev_row['ma25'] and curr_row['ma5'] > curr_row['ma25']:
+            p_row, c_row = df.iloc[i-1], df.iloc[i]
+            if p_row['ma5'] <= p_row['ma25'] and c_row['ma5'] > c_row['ma25']:
                 gc_found = True; break
-        if gc_found: raw_s += 40; d_l.append("GC初動(+40)")
+        if gc_found: raw_s += 20; d_l.append("GC初動(+20)")
         
-        if df['ma25'].diff().iloc[-3:].min() > 0: raw_s += 20; d_l.append("MA25上昇(+20)")
+        if df['ma25'].diff().iloc[-3:].min() > 0: raw_s += 25; d_l.append("MA25上昇(+25)")
         if curr['close'] > curr['high_10d']: raw_s += 20; d_l.append("高値突破(+20)")
-
-        p = detect_strict_bottom(df['close'].values)
-        raw_s += p['score']; d_l.extend(p['desc'])
-
-        # --- 出来高加点（完全足し算） ---
-        vol_score = 0
+        
+        # 出来高判定
         if len(df) >= 15:
             base_vol = df['volume'].iloc[-8:-3].mean()
             vol_ratio = curr['volume'] / base_vol if base_vol > 0 else 1.0
-            if is_yang:
-                if vol_ratio >= 5.0:   vol_score = 70; d_l.append(f"出来高異常値(x{vol_ratio:.1f})")
-                elif vol_ratio >= 3.0: vol_score = 50; d_l.append(f"出来高爆増(x{vol_ratio:.1f})")
-                elif vol_ratio >= 2.0: vol_score = 30; d_l.append(f"出来高急増(x{vol_ratio:.1f})")
-                elif vol_ratio >= 1.5: vol_score = 15; d_l.append(f"出来高増加(x{vol_ratio:.1f})")
+            if is_yang and vol_ratio >= 1.5: d_l.append(f"出来高x{vol_ratio:.2f}")
+            
+        final_score = raw_s
+        # ボリンジャーバンドによる過熱警戒
+        if curr['close'] > curr['bbh']: final_score = int(final_score * 0.7); d_l.append("過熱警戒")
         
-        final_score = raw_s + vol_score
-        if curr['close'] > curr['bbh']:
-            final_score = int(final_score * 0.7); d_l.append("過熱警戒")
-
         if final_score >= 40:
             name, sector = master_info.get(s_code, ("不明", "不明"))
             up_res.append((final_score, f"{s_code} {name} ({sector})\n{curr['close']:.1f}円 【{final_score}点】\n" + "・".join(d_l)))
@@ -197,24 +168,24 @@ if __name__ == "__main__":
     master = {normalize_code(m["Code"]): (m["CompanyName"], m["Sector17CodeName"]) for m in m_r.json().get("info", [])}
     
     # 価格データ取得
-    all_prices, success_days = [], 0
+    all_prices = []
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(60)]
     for d in reversed(dates):
         r = requests.get(f"{host}/equities/bars/daily", headers=headers, params={"date": d})
         if r.status_code == 200:
             data = r.json().get("data", [])
-            if data: all_prices.extend(data); success_days += 1
-    
+            if data: all_prices.extend(data)
+            
     if all_prices:
         full_df = pd.DataFrame(all_prices).sort_values(['Code', 'Date'])
         today = datetime.now().strftime('%Y.%m.%d')
         
         # 1. 国内主要株レポート
-        m_up = run_scan(set(MAJOR_STOCKS.keys()), full_df, MAJOR_STOCKS)
-        if m_up:
-            send_line(f"{today} 国内主要株レポート\n" + "\n\n".join(m_up) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/")
-            
-        # 2. 株式市場レポート（全体）
-        a_up = run_scan(None, full_df, master)
-        if a_up:
-            send_line(f"{today} 株式市場レポート\n" + "\n\n".join(a_up) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/")
+        m_res = run_scan(set(STOCKS_DATA.keys()), full_df, STOCKS_DATA)
+        msg1 = f"{today} 国内主要株レポート\n調査対象：TOPIX100・日経225・JPXプライム150\nデータ取得日数：40日\n\n【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(m_res) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
+        requests.post("https://api.line.me/v2/bot/message/push", headers={"Authorization": f"Bearer {LINE_TOKEN}"}, json={"to": USER_ID, "messages": [{"type": "text", "text": msg1}]})
+        
+        # 2. 株式市場レポート
+        a_res = run_scan(None, full_df, master)
+        msg2 = f"{today} 株式市場レポート\n調査対象：国内株式市場 全銘柄\nデータ取得日数：40日\n\n【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(a_res) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
+        requests.post("https://api.line.me/v2/bot/message/push", headers={"Authorization": f"Bearer {LINE_TOKEN}"}, json={"to": USER_ID, "messages": [{"type": "text", "text": msg2}]})
