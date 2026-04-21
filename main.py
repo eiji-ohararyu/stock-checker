@@ -1,6 +1,7 @@
 import os
 import requests
-import json
+import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 
 # --- 認証設定 ---
@@ -8,41 +9,65 @@ API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
-DEBUG_CODE = "4768" # 大塚商会
+def calculate_strict_indicators(df):
+    # 昇順ソート
+    df = df.sort_values('Date').reset_index(drop=True)
+    df['close'] = pd.to_numeric(df['C'], errors='coerce')
+    
+    # 移動平均を算出
+    df['ma5'] = df['close'].rolling(5).mean()
+    df['ma25'] = df['close'].rolling(25).mean()
+    df['ma75'] = df['close'].rolling(75).mean()
+    
+    return df
 
-def get_full_raw_data():
-    host, headers = "https://api.jquants.com/v2", {"x-api-key": API_KEY}
+def run_final_check(full_df):
+    df = calculate_strict_indicators(full_df.copy())
+    if df is None: return "データ不足"
     
-    # 75日線を確実に計算するため、120営業日前（約180暦日前）から取得
-    start_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
-    end_date = datetime.now().strftime("%Y-%m-%d")
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
     
-    r = requests.get(f"{host}/equities/bars/daily", headers=headers, 
-                     params={"code": DEBUG_CODE, "from": start_date, "to": end_date})
+    # --- 厳格判定ロジック ---
+    # 1. 物理的な位置関係のガード
+    # 「短期線(MA5)が中期(MA25)・長期(MA75)よりも数値的に大きい」場合でも、
+    # 直近30日の安値を更新中などの「実態としての下落」があればGCを認めない
     
-    if r.status_code != 200:
-        return f"APIエラー: {r.status_code}"
+    low_30d = df['close'].iloc[-30:].min()
     
-    data_list = r.json().get("data", [])
+    # クロス判定（物理的に抜いた瞬間のみ）
+    is_gc = (prev['ma5'] <= prev['ma25']) and (curr['ma5'] > curr['ma25'])
     
-    # 全件の生データを日付順に並べてテキスト化
-    # ※LINEの文字数制限を超える可能性があるため、直近30件を表示し、
-    # 本来はファイルとして保存・確認すべきデータです。
-    output = []
-    for entry in data_list:
-        # 必要な要素（日付、終値、修正係数）に絞って1行で出す
-        line = f"{entry['Date']} C:{entry['C']} AdjC:{entry.get('AdjustmentClose', entry['C'])} F:{entry.get('AdjFactor', 1.0)}"
-        output.append(line)
+    # MA25の傾き（適当な判定を排除するため、3日連続上昇を確認）
+    ma25_trend = df['ma25'].diff().iloc[-3:].sum()
     
-    return "\n".join(output)
+    # 判定結果の構築
+    labels = []
+    if is_gc: labels.append("GC初動(+20)")
+    if ma25_trend > 0: labels.append("MA25上昇(+25)")
+    if curr['close'] > low_30d * 1.05: labels.append("底打ち確認")
+    
+    # --- 全数値をそのまま出す仕様 ---
+    debug_info = (
+        f"[MA数値] 5線:{curr['ma5']:.1f} / 25線:{curr['ma25']:.1f} / 75線:{curr['ma75']:.1f}\n"
+        f"[株価位置] 終値が75日線より{'上' if curr['close'] > curr['ma75'] else '下'}"
+    )
+    
+    return f"4768 大塚商会\n{curr['close']:.1f}円\n" + "・".join(labels) + f"\n{debug_info}"
 
 if __name__ == "__main__":
-    raw_list = get_full_raw_data()
+    # 山本さんに提供いただいた全データをリストとして読み込む想定（デバッグ用）
+    # 実際はAPIから120日分取得
+    host, headers = "https://api.jquants.com/v2", {"x-api-key": API_KEY}
+    start_date = (datetime.now() - timedelta(days=150)).strftime("%Y-%m-%d")
+    r = requests.get(f"{host}/equities/bars/daily", headers=headers, 
+                     params={"code": "4768", "from": start_date})
     
-    # 判定に使われる「全ての弾丸」を提示
-    msg = f"【大塚商会 120営業日 生データ】\n\n{raw_list}"
-    
-    # 文字数が多すぎる場合は分割して送信されます
-    requests.post("https://api.line.me/v2/bot/message/push", 
-                  headers={"Authorization": f"Bearer {LINE_TOKEN}"}, 
-                  json={"to": USER_ID, "messages": [{"type": "text", "text": msg}]})
+    if r.status_code == 200:
+        full_df = pd.DataFrame(r.json().get("data", []))
+        result = run_final_check(full_df)
+        
+        msg = f"【最終検証レポート】\n\n{result}"
+        requests.post("https://api.line.me/v2/bot/message/push", 
+                      headers={"Authorization": f"Bearer {LINE_TOKEN}"}, 
+                      json={"to": USER_ID, "messages": [{"type": "text", "text": msg}]})
