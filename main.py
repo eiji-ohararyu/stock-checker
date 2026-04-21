@@ -10,7 +10,7 @@ API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
-# 主要株リスト (STOCKS_DATAは以前のものを維持)
+# 主要株リスト (TOPIX100 / 日経225 / JPX150)
 STOCKS_DATA = {
     "1332": ("ニッスイ", "水産・農林業"), "1605": ("INPEX", "鉱業"), "1721": ("コムシスHD", "建設業"),
     "1801": ("大成建", "建設業"), "1802": ("大林組", "建設業"), "1803": ("清水建", "建設業"),
@@ -111,11 +111,9 @@ def calculate_indicators(df):
     df = df.dropna(subset=['close']).reset_index(drop=True)
     if len(df) < 75: return None
     
-    # 5/25/75 移動平均
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma25'] = df['close'].rolling(25).mean()
     df['ma75'] = df['close'].rolling(75).mean()
-    
     df['high_10d'] = pd.to_numeric(df['H'], errors='coerce').shift(1).rolling(10).max()
     df['bbh'] = df['close'].rolling(20).mean() + (df['close'].rolling(20).std() * 2)
     return df
@@ -141,38 +139,40 @@ def run_scan(target_codes, full_df, master_info):
         gc_found = False
         for i in range(len(df)-5, len(df)):
             if i <= 0: continue
-            p_r, c_r = df.iloc[i-1], df.iloc[i]
-            if p_r['ma5'] <= p_r['ma25'] and c_r['ma5'] > c_r['ma25']:
+            if df['ma5'].iloc[i-1] <= df['ma25'].iloc[i-1] and df['ma5'].iloc[i] > df['ma25'].iloc[i]:
                 gc_found = True; break
         if gc_found: raw_s += 20; labels.append("GC初動(+20)")
         
-        # 3. MA25上昇トレンド
+        # 3. MA25上昇
         if df['ma25'].diff().iloc[-3:].min() > 0: raw_s += 25; labels.append("MA25上昇(+25)")
         
-        # 4. 【追加】トレンド初動（パーフェクトオーダー＆収束）
-        # 並びが上から 5 > 25 > 75 かつ、短期と長期の乖離が3%以内
+        # 4. 並び(PO)と収束の判定
         is_po = (c['ma5'] > c['ma25']) and (c['ma25'] > c['ma75'])
-        is_converged = ((c['ma5'] - c['ma75']) / c['ma75']) < 0.03
+        is_converged = ((abs(c['ma5'] - c['ma75'])) / c['ma75']) < 0.03
+        
         if is_po and is_converged:
             raw_s += 30; labels.append("トレンド初動(+30)")
-        
+        elif is_po:
+            raw_s += 10; labels.append("上昇トレンド継続(+10)")
+        elif is_converged:
+            raw_s += 10; labels.append("エネルギー収束(+10)")
+            
         # 5. 高値突破
         if c['close'] > c['high_10d']: raw_s += 20; labels.append("高値突破(+20)")
         
         # 6. 出来高加点
-        vol_score = 0
         base_vol = df['volume'].iloc[-8:-3].mean()
         vol_ratio = c['volume'] / base_vol if base_vol > 0 else 1.0
         if is_yang and vol_ratio >= 1.5:
             v_pts = 50 if vol_ratio >= 3.0 else 30
-            vol_score = v_pts; labels.append(f"出来高x{vol_ratio:.1f}(+{v_pts})")
+            raw_s += v_pts; labels.append(f"出来高x{vol_ratio:.1f}(+{v_pts})")
             
-        final_score = raw_s + vol_score
+        final_score = raw_s
         if c['close'] > c['bbh']: final_score = int(final_score * 0.7); labels.append("過熱警戒")
         
         if final_score >= 40:
             name, sector = master_info.get(s_code, ("不明", "不明"))
-            suffix = "\n※短期・中期・長期が理想的な並びです" if (is_po and is_converged) else ""
+            suffix = "\n※理想的な「順列」と「収束」が重なっています" if (is_po and is_converged) else ""
             up_res.append((final_score, f"{s_code} {name} ({sector})\n{c['close']:.1f}円 【{final_score}点】\n" + "・".join(labels) + suffix))
             
     return [x[1] for x in sorted(up_res, key=lambda x:x[0], reverse=True)[:10]]
