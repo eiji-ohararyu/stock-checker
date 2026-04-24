@@ -139,38 +139,57 @@ def generate_report(results, label_text):
 
 # メイン処理
 if __name__ == "__main__":
-    all_codes = [str(i) for i in range(1000, 10000)]
     major_results, all_results = [], []
     
-    # 出来高フィルター
-    print("Step 1: Filtering...")
-    tickers = [f"{c}.T" for c in all_codes]
-    v_data = yf.download(tickers, period="20d", progress=False)['Volume']
-    candidates = []
-    for c in all_codes:
-        try:
-            v = v_data[f"{c}.T"].dropna()
-            if len(v) >= 8 and (v.iloc[-1] / v.iloc[-8:-3].mean()) > 1.1: candidates.append(f"{c}.T")
-        except: continue
+    # 1. 主要銘柄のスキャン（無条件）
+    print("Step 1: Processing Major Stocks...")
+    major_tickers = [f"{c}.T" for c in STOCKS_DATA.keys()]
+    major_data = yf.download(major_tickers, period="120d", group_by='ticker', progress=False)
     
-    targets = list(set(candidates + [f"{c}.T" for c in STOCKS_DATA.keys()]))
-    print(f"Scoring {len(targets)} stocks...")
-
-    # スキャン実行
-    full_data = yf.download(targets, period="120d", group_by='ticker', progress=False)
-    for t in targets:
+    for t in major_tickers:
         code = t.replace(".T", "")
         try:
-            df = full_data[t].dropna() if len(targets) > 1 else full_data.dropna()
+            df = major_data[t].dropna()
             res = calculate_score(code, df)
-            if res:
-                all_results.append(res)
-                if code in STOCKS_DATA: major_results.append(res)
+            if res: major_results.append(res)
         except: continue
+
+    # 2. 全銘柄のスキャン（出来高フィルターあり）
+    print("Step 2: Filtering and Processing All Stocks...")
+    all_codes = [str(i) for i in range(1000, 10000)]
+    all_tickers = [f"{c}.T" for c in all_codes]
+    
+    # 出来高データのみ取得
+    v_data = yf.download(all_tickers, period="20d", progress=False)['Volume']
+    candidates = []
+    for c in all_codes:
+        t_key = f"{c}.T"
+        if t_key not in v_data: continue
+        try:
+            v = v_data[t_key].dropna()
+            if len(v) >= 8 and (v.iloc[-1] / v.iloc[-8:-3].mean()) > 1.1: 
+                candidates.append(t_key)
+        except: continue
+    
+    # フィルター通過銘柄の詳細取得
+    if candidates:
+        candidate_data = yf.download(candidates, period="120d", group_by='ticker', progress=False)
+        for t in candidates:
+            code = t.replace(".T", "")
+            try:
+                df = candidate_data[t].dropna() if len(candidates) > 1 else candidate_data.dropna()
+                res = calculate_score(code, df)
+                if res: all_results.append(res)
+            except: continue
+
+    # 主要銘柄の結果は全レポートにも含める
+    all_results.extend(major_results)
+    # 重複削除
+    unique_all = {res[1]: res for res in all_results}.values()
 
     # レポート送信
     send_line(generate_report(major_results, "国内主要株レポート"))
-    send_line(generate_report(all_results, "株式市場レポート"))
+    send_line(generate_report(list(unique_all), "株式市場レポート"))
 
 # --- AI Guidelines ---
 # 1. Never edit parts that were not explicitly requested for modification.
