@@ -59,12 +59,12 @@ def calculate_score(s_code, df):
     c_p = close.iloc[-1]
     raw_s, labels = 0, []
     
-    # 1. 陽線判定 (+15)
+    # 1. 陽線判定(+15)
     if c_p > open_p.iloc[-1]: 
         raw_s += 15
         labels.append("陽線(+15)")
     
-    # 2. GC初動判定 (+20)
+    # 2. GC初動判定(+20)
     if ((ma5.shift(1) <= ma25.shift(1)) & (ma5 > ma25)).iloc[-5:].any():
         raw_s += 20
         labels.append("GC初動(+20)")
@@ -78,7 +78,7 @@ def calculate_score(s_code, df):
         raw_s += 10
         labels.append("25日線上昇(+10)")
     
-    # 4. トレンド判定 (初動:+30 / 継続・収束:+10)
+    # 4. トレンド判定(初動:+30 / 継続・収束:+10)
     is_po = (ma5.iloc[-1] > ma25.iloc[-1] > ma75.iloc[-1])
     is_converged = ((abs(ma5.iloc[-1] - ma75.iloc[-1])) / ma75.iloc[-1]) < 0.03
     if is_po and is_converged and m5_up and m25_up:
@@ -91,7 +91,7 @@ def calculate_score(s_code, df):
         raw_s += 10
         labels.append("エネルギー収束(+10)")
             
-    # 5. 高値突破判定 (+20)
+    # 5. 高値突破判定(+20)
     if c_p > high_10d.iloc[-1]: 
         raw_s += 20
         labels.append("高値突破(+20)")
