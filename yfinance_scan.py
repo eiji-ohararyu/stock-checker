@@ -66,7 +66,7 @@ STOCKS_DATA = {
     "6479": ("ミネベアミツミ", "電気機器"), "6501": ("日立", "電気機器"), "6503": ("三菱電", "電気機器"),
     "6504": ("富士電機", "電気機器"), "6506": ("安川電", "電気機器"), "6526": ("ソシオネクスト", "電気機器"),
     "6594": ("ニデック", "電気機器"), "6645": ("オムロン", "電気機器"), "6674": ("ＧＳユアサ", "電気機器"),
-    "6701": ("NEC", "電気機器"), "6702": ("富士通", "電気機器"), "6723": ("ルネサス", "電気機器"),
+    "6701": ("NEC", "電気機器"), "6702": ("富士富士通", "電気機器"), "6723": ("ルネサス", "電気機器"),
     "6724": ("エプソン", "電気機器"), "6752": ("パナソニック", "電気機器"), "6753": ("シャープ", "電気機器"),
     "6758": ("ソニーG", "電気機器"), "6762": ("TDK", "電気機器"), "6841": ("横河電", "電気機器"),
     "6857": ("アドバンテスト", "電気機器"), "6861": ("キーエンス", "電気機器"), "6869": ("シスメックス", "精密機器"),
@@ -112,7 +112,6 @@ def normalize_code(raw_code):
     m = re.search(r'\d{4}', s)
     return m.group(0) if m else s.zfill(4)[:4]
 
-# --- LINE送信関数 ---
 def send_line(msg):
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Authorization": f"Bearer {LINE_TOKEN}"}
@@ -136,7 +135,6 @@ def calculate_indicators(df):
 
 def run_scan(target_codes, data_dict, master_info, label_text):
     up_res = []
-    # yfinanceでは全銘柄スキャンの場合に、取得できたデータからコードを抽出
     actual_targets = target_codes if target_codes else list(data_dict.keys())
     
     for s_code in actual_targets:
@@ -147,11 +145,9 @@ def run_scan(target_codes, data_dict, master_info, label_text):
         c = df.iloc[-1]
         raw_s, labels = 0, []
         
-        # 1. 陽線
         is_yang = c['close'] > c['open']
         if is_yang: raw_s += 15; labels.append("陽線(+15)")
         
-        # 2. GC初動
         gc_found = False
         for i in range(len(df)-5, len(df)):
             if i <= 0: continue
@@ -159,29 +155,24 @@ def run_scan(target_codes, data_dict, master_info, label_text):
                 gc_found = True; break
         if gc_found: raw_s += 20; labels.append("GC初動(+20)")
         
-        # 3. MA25上昇
         if df['ma25'].diff().iloc[-3:].min() > 0: raw_s += 25; labels.append("MA25上昇(+25)")
         
-        # 4. 並び(PO)と収束
         is_po = (c['ma5'] > c['ma25']) and (c['ma25'] > c['ma75'])
         is_converged = ((abs(c['ma5'] - c['ma75'])) / c['ma75']) < 0.03
-        
-        if is_po and is_converged:
-            raw_s += 30; labels.append("トレンド初動(+30)")
-        elif is_po:
-            raw_s += 10; labels.append("上昇トレンド継続(+10)")
-        elif is_converged:
-            raw_s += 10; labels.append("エネルギー収束(+10)")
+        if is_po and is_converged: raw_s += 30; labels.append("トレンド初動(+30)")
+        elif is_po: raw_s += 10; labels.append("上昇トレンド継続(+10)")
+        elif is_converged: raw_s += 10; labels.append("エネルギー収束(+10)")
             
-        # 5. 高値突破
         if c['close'] > c['high_10d']: raw_s += 20; labels.append("高値突破(+20)")
         
-        # 6. 出来高加点
-        base_vol = df['volume'].iloc[-8:-3].mean()
-        vol_ratio = c['volume'] / base_vol if base_vol > 0 else 1.0
-        if is_yang and vol_ratio >= 1.5:
-            v_pts = 50 if vol_ratio >= 3.0 else 30
-            raw_s += v_pts; labels.append(f"出来高x{vol_ratio:.1f}(+{v_pts})")
+        # 出来高計算の修正：安定して直近5日間の平均を取るように固定
+        if len(df) >= 10:
+            recent_vols = df['volume'].iloc[-6:-1]
+            base_vol = recent_vols.mean()
+            vol_ratio = c['volume'] / base_vol if base_vol > 0 else 1.0
+            if is_yang and vol_ratio >= 1.5:
+                v_pts = 50 if vol_ratio >= 3.0 else 30
+                raw_s += v_pts; labels.append(f"出来高x{vol_ratio:.1f}(+{v_pts})")
             
         final_score = raw_s
         if c['close'] > c['bbh']: final_score = int(final_score * 0.7); labels.append("過熱警戒")
@@ -194,38 +185,34 @@ def run_scan(target_codes, data_dict, master_info, label_text):
     if not top_10: return None
     
     today = datetime.now().strftime('%Y.%m.%d')
-    # データ取得日数を動的に取得
-    sample_df = data_dict[list(data_dict.keys())[0]]
-    days_count = len(sample_df)
-    
+    days_count = len(data_dict[list(data_dict.keys())[0]])
     target_desc = '国内主要株 (TOPIX100・日経225・JPX150)' if target_codes else '国内株式市場 全銘柄'
     header = f"{today} {label_text}\n調査対象：{target_desc}\nデータ取得日数：{days_count}日\n\n【判定：上昇優勢 TOP10】\n\n"
     footer = "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
     return header + "\n\n".join(top_10) + footer
 
 if __name__ == "__main__":
-    # --- 全銘柄のリスト取得 (1000〜9999) ---
     all_codes = [str(i) for i in range(1000, 10000)]
-    tickers = [f"{c}.T" for c in all_codes]
-    
-    print(f"Fetching data for tickers via yfinance...")
-    # 判定に必要な120日分のデータを一括ダウンロード
-    data = yf.download(tickers, period="120d", group_by='ticker', threads=True)
-    
+    chunk_size = 500
     data_dict = {}
-    for t in tickers:
+    
+    for i in range(0, len(all_codes), chunk_size):
+        chunk = all_codes[i:i + chunk_size]
+        tickers = [f"{c}.T" for c in chunk]
+        print(f"Fetching chunk {i//chunk_size + 1}...")
         try:
-            s_df = data[t].dropna()
-            if not s_df.empty and len(s_df) >= 75:
-                data_dict[t.replace(".T", "")] = s_df
-        except:
-            continue
+            chunk_data = yf.download(tickers, period="120d", group_by='ticker', threads=True, progress=False)
+            for t in tickers:
+                try:
+                    s_df = chunk_data[t].dropna()
+                    if not s_df.empty and len(s_df) >= 75:
+                        data_dict[t.replace(".T", "")] = s_df
+                except: continue
+        except: continue
+        time.sleep(1)
 
     if data_dict:
-        # 1. 国内主要株レポート
         m_report = run_scan(list(STOCKS_DATA.keys()), data_dict, STOCKS_DATA, "国内主要株レポート")
         if m_report: send_line(m_report)
-        
-        # 2. 株式市場レポート
         a_report = run_scan(None, data_dict, STOCKS_DATA, "株式市場レポート")
         if a_report: send_line(a_report)
