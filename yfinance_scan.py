@@ -10,7 +10,7 @@ import time
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
-# 主要株リスト (TOPIX100 / 日経225 / JPX150)
+# 国内主要株リスト (TOPIX100 / 日経225 / JPX150)
 STOCKS_DATA = {
     "1332": ("ニッスイ", "水産・農林業"), "1605": ("INPEX", "鉱業"), "1721": ("コムシスHD", "建設業"), "1801": ("大成建", "建設業"), "1802": ("大林組", "建設業"), "1803": ("清水建", "建設業"), "1808": ("長谷工", "建設業"), "1812": ("鹿島", "建設業"), "1925": ("大和ハウス", "建設業"), "1928": ("積水ハウス", "建設業"), "1963": ("日揮HD", "建設業"), "2002": ("日清粉G", "食料品"),
     "2267": ("ヤクルト", "食料品"), "2269": ("明治HD", "食料品"), "2282": ("日本ハム", "食料品"), "2413": ("エムスリー", "サービス業"), "2433": ("博報堂DY", "サービス業"), "2501": ("サッポロ", "食料品"), "2502": ("アサヒ", "食料品"), "2503": ("キリンHD", "食料品"), "2531": ("宝HD", "食料品"), "2768": ("双日", "卸売業"), "2801": ("キッコーマン", "食料品"), "2802": ("味の素", "食料品"),
@@ -96,7 +96,7 @@ def calculate_score(s_code, df):
         raw_s += 20
         labels.append("高値突破(+20)")
     
-    # 6. 出来高加点判定(1.5倍:+30 / 3倍:+40)
+    # 6. 出来高加点判定(1.5倍:+30/3倍:+40)
     base_vol = vol.iloc[-8:-3].mean()
     vol_ratio = vol.iloc[-1] / base_vol if base_vol > 0 else 1.0
     if c_p > open_p.iloc[-1]:
@@ -141,7 +141,7 @@ def generate_report(results, label_text):
 if __name__ == "__main__":
     major_results, all_results = [], []
     
-    # 1. 主要銘柄の計算
+    # 1. 国内主要銘柄 スコア計算
     print("Step 1: Processing Major Stocks...")
     major_tickers = [f"{c}.T" for c in STOCKS_DATA.keys()]
     major_data = yf.download(major_tickers, period="120d", group_by='ticker', progress=False)
@@ -154,7 +154,7 @@ if __name__ == "__main__":
             if res: major_results.append(res)
         except: continue
 
-    # 2. 全銘柄の計算
+    # 2. 全銘柄 スコア計算
     print("Step 2: Filtering and Processing All Stocks...")
     all_codes = [str(i) for i in range(1000, 10000)]
     all_tickers = [f"{c}.T" for c in all_codes]
@@ -179,7 +179,7 @@ if __name__ == "__main__":
                 if res: all_results.append(res)
             except: continue
 
-    # データの統合
+    # データ統合
     all_results.extend(major_results)
     unique_all = {res[1]: res for res in all_results}.values()
 
