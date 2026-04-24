@@ -20,7 +20,6 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
 # 主要株リスト (TOPIX100 / 日経225 / JPX150)
-# ※各セクターの代表銘柄や指数構成銘柄を網羅。分析対象の「分母」として固定。
 STOCKS_DATA = {
     "1332": ("ニッスイ", "水産・農林業"), "1605": ("INPEX", "鉱業"), "1721": ("コムシスHD", "建設業"),
     "1801": ("大成建", "建設業"), "1802": ("大林組", "建設業"), "1803": ("清水建", "建設業"),
@@ -121,12 +120,10 @@ def send_line(msg):
     requests.post(url, headers=headers, json=payload)
 
 def calculate_indicators(df):
-    # yfinanceのカラム名を内部変数にマッピング
     df['open'] = df['Open']
     df['high'] = df['High']
     df['close'] = df['Close']
     df['volume'] = df['Volume']
-    
     df = df.dropna(subset=['close']).reset_index(drop=True)
     if len(df) < 75: return None
     
@@ -137,9 +134,12 @@ def calculate_indicators(df):
     df['bbh'] = df['close'].rolling(20).mean() + (df['close'].rolling(20).std() * 2)
     return df
 
-def run_scan(target_codes, data_dict, master_info):
+def run_scan(target_codes, data_dict, master_info, label_text):
     up_res = []
-    for s_code in target_codes:
+    # yfinanceでは全銘柄スキャンの場合に、取得できたデータからコードを抽出
+    actual_targets = target_codes if target_codes else list(data_dict.keys())
+    
+    for s_code in actual_targets:
         if s_code not in data_dict: continue
         df = calculate_indicators(data_dict[s_code])
         if df is None: continue
@@ -151,7 +151,7 @@ def run_scan(target_codes, data_dict, master_info):
         is_yang = c['close'] > c['open']
         if is_yang: raw_s += 15; labels.append("陽線(+15)")
         
-        # 2. GC初動 (直近5日間)
+        # 2. GC初動
         gc_found = False
         for i in range(len(df)-5, len(df)):
             if i <= 0: continue
@@ -190,28 +190,42 @@ def run_scan(target_codes, data_dict, master_info):
             name, sector = master_info.get(s_code, ("不明", "不明"))
             up_res.append((final_score, f"{s_code} {name} ({sector})\n{c['close']:.1f}円 【{final_score}点】\n" + "・".join(labels)))
             
-    return [x[1] for x in sorted(up_res, key=lambda x:x[0], reverse=True)[:10]]
+    top_10 = [x[1] for x in sorted(up_res, key=lambda x:x[0], reverse=True)[:10]]
+    if not top_10: return None
+    
+    today = datetime.now().strftime('%Y.%m.%d')
+    # データ取得日数を動的に取得
+    sample_df = data_dict[list(data_dict.keys())[0]]
+    days_count = len(sample_df)
+    
+    target_desc = '国内主要株 (TOPIX100・日経225・JPX150)' if target_codes else '国内株式市場 全銘柄'
+    header = f"{today} {label_text}\n調査対象：{target_desc}\nデータ取得日数：{days_count}日\n\n【判定：上昇優勢 TOP10】\n\n"
+    footer = "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
+    return header + "\n\n".join(top_10) + footer
 
 if __name__ == "__main__":
-    # yfinance用にティッカーを変換
-    tickers = [f"{c}.T" for c in STOCKS_DATA.keys()]
-    print(f"Fetching data for {len(tickers)} stocks via yfinance...")
+    # --- 全銘柄のリスト取得 (1000〜9999) ---
+    all_codes = [str(i) for i in range(1000, 10000)]
+    tickers = [f"{c}.T" for c in all_codes]
     
-    # 75MAを安定して計算するため120日分取得
+    print(f"Fetching data for tickers via yfinance...")
+    # 判定に必要な120日分のデータを一括ダウンロード
     data = yf.download(tickers, period="120d", group_by='ticker', threads=True)
     
     data_dict = {}
     for t in tickers:
         try:
             s_df = data[t].dropna()
-            if not s_df.empty:
+            if not s_df.empty and len(s_df) >= 75:
                 data_dict[t.replace(".T", "")] = s_df
         except:
             continue
 
-    today = datetime.now().strftime('%Y.%m.%d')
-    m_res = run_scan(list(STOCKS_DATA.keys()), data_dict, STOCKS_DATA)
-    
-    if m_res:
-        msg = f"{today} yfinance Stock Scanner\n\n" + "\n\n".join(m_res)
-        send_line(msg)
+    if data_dict:
+        # 1. 国内主要株レポート
+        m_report = run_scan(list(STOCKS_DATA.keys()), data_dict, STOCKS_DATA, "国内主要株レポート")
+        if m_report: send_line(m_report)
+        
+        # 2. 株式市場レポート
+        a_report = run_scan(None, data_dict, STOCKS_DATA, "株式市場レポート")
+        if a_report: send_line(a_report)
