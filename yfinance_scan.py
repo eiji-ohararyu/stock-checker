@@ -98,11 +98,16 @@ STOCKS_DATA = {
     "9843": ("ニトリHD", "小売業"), "9983": ("ファストリ", "小売業"), "9984": ("ソフトバンクG", "情報・通信業")
 }
 
+def send_line(msg):
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {"Authorization": f"Bearer {LINE_TOKEN}"}
+    payload = {"to": USER_ID, "messages": [{"type": "text", "text": msg}]}
+    requests.post(url, headers=headers, json=payload)
+
 def calculate_score(s_code, df, master_info):
     df = df.dropna(subset=['Close']).reset_index(drop=True)
     if len(df) < 75: return None
     
-    # 基本指標
     close = df['Close']
     open_p = df['Open']
     high = df['High']
@@ -112,8 +117,7 @@ def calculate_score(s_code, df, master_info):
     ma25 = close.rolling(25).mean()
     ma75 = close.rolling(75).mean()
     high_10d = high.shift(1).rolling(10).max()
-    bb_std = close.rolling(20).std()
-    bbh = close.rolling(20).mean() + (bb_std * 2)
+    bbh = close.rolling(20).mean() + (close.rolling(20).std() * 2)
     
     c_p = close.iloc[-1]
     raw_s, labels = 0, []
@@ -132,10 +136,9 @@ def calculate_score(s_code, df, master_info):
     if ma5_up: raw_s += 10; labels.append("5日線上昇(+10)")
     if ma25_up: raw_s += 10; labels.append("25日線上昇(+10)")
     
-    # 4. トレンド初動 (+30) - 厳格化条件
+    # 4. トレンド初動 (+30)
     is_po = (ma5.iloc[-1] > ma25.iloc[-1]) and (ma25.iloc[-1] > ma75.iloc[-1])
     is_converged = ((abs(ma5.iloc[-1] - ma75.iloc[-1])) / ma75.iloc[-1]) < 0.03
-    
     if is_po and is_converged and ma5_up and ma25_up:
         raw_s += 30; labels.append("トレンド初動(+30)")
     elif is_po:
@@ -146,8 +149,8 @@ def calculate_score(s_code, df, master_info):
     # 5. 高値突破 (+20)
     if c_p > high_10d.iloc[-1]: raw_s += 20; labels.append("高値突破(+20)")
     
-    # 6. 出来高加点 (1.5倍:+30, 3倍:+40)
-    base_vol = vol.iloc[-6:-1].mean()
+    # 6. 出来高加点 (1.5倍:+30, 3倍:+40) - 指定のiloc[-8:-3]を使用
+    base_vol = vol.iloc[-8:-3].mean()
     vol_ratio = vol.iloc[-1] / base_vol if base_vol > 0 else 1.0
     if is_yang:
         if vol_ratio >= 3.0:
@@ -174,37 +177,61 @@ def generate_report(results, label_text, is_major):
     return header + "\n\n".join(top_10) + footer
 
 if __name__ == "__main__":
+    # 全銘柄リスト作成
     all_codes = [str(i) for i in range(1000, 10000)]
-    chunk_size = 1000
     major_results, all_results = [], []
     
-    for i in range(0, len(all_codes), chunk_size):
-        chunk = all_codes[i:i + chunk_size]
-        tickers = [f"{c}.T" for c in chunk]
-        print(f"Fetching chunk {i//chunk_size + 1}...")
+    # --- ステップ1：軽量スキャン（出来高1.1倍フィルター） ---
+    # 全銘柄の出来高データだけを最小限（直近10日分）取得
+    print("Step 1: Running Volume Filter (1.1x)...")
+    tickers = [f"{c}.T" for c in all_codes]
+    chunk_size = 500
+    candidates = []
+    
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i + chunk_size]
         try:
-            # yfinanceで一括取得
-            chunk_data = yf.download(tickers, period="120d", group_by='ticker', threads=True, progress=False)
-            if chunk_data.empty: continue
-            
-            for t in tickers:
+            # Volumeのみ取得して軽量化
+            v_data = yf.download(chunk, period="10d", progress=False)['Volume']
+            for t in chunk:
+                try:
+                    v_series = v_data[t].dropna()
+                    if len(v_series) >= 8:
+                        base = v_series.iloc[-8:-3].mean()
+                        curr = v_series.iloc[-1]
+                        if base > 0 and (curr / base) > 1.1:
+                            candidates.append(t)
+                except: continue
+        except: continue
+        time.sleep(1)
+    
+    # 主要銘柄はフィルターに関わらず必ず含める
+    major_tickers = [f"{c}.T" for c in STOCKS_DATA.keys()]
+    final_targets = list(set(candidates + major_tickers))
+    print(f"Candidates found: {len(candidates)} (Total scan: {len(final_targets)})")
+
+    # --- ステップ2：精密スキャン（選別された銘柄のみ） ---
+    # 120日分の全データを取得してスコアリング
+    for i in range(0, len(final_targets), 100):
+        chunk = final_targets[i:i + 100]
+        try:
+            full_data = yf.download(chunk, period="120d", group_by='ticker', progress=False)
+            for t in chunk:
                 s_code = t.replace(".T", "")
                 try:
-                    # マルチインデックスから個別のデータを安全に抽出
-                    s_df = chunk_data[t].dropna()
+                    s_df = full_data[t].dropna()
                     if s_df.empty: continue
                     
                     res = calculate_score(s_code, s_df, STOCKS_DATA)
                     if res:
-                        if s_code in STOCKS_DATA:
-                            major_results.append(res)
+                        if s_code in STOCKS_DATA: major_results.append(res)
                         all_results.append(res)
                 except: continue
         except: continue
         time.sleep(1)
 
+    # 送信
     m_report = generate_report(major_results, "国内主要株レポート", True)
     if m_report: send_line(m_report)
-    
     a_report = generate_report(all_results, "株式市場レポート", False)
     if a_report: send_line(a_report)
