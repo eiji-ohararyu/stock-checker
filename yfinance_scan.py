@@ -96,7 +96,7 @@ def calculate_score(s_code, df):
         raw_s += 20
         labels.append("高値突破(+20)")
     
-    # 6. 出来高加点判定(1.5倍:+30 / 3倍:+40)
+    # 6. 出来高判定(1.5倍:+30 / 3倍:+40)
     base_vol = vol.iloc[-8:-3].mean()
     vol_ratio = vol.iloc[-1] / base_vol if base_vol > 0 else 1.0
     if c_p > open_p.iloc[-1]:
@@ -181,7 +181,7 @@ if __name__ == "__main__":
                 if res: all_results.append(res)
             except: continue
 
-    # データ統合と重複排除
+    # データ統合・重複排除
     all_results.extend(major_results)
     unique_all = list({res[1]: res for res in all_results}.values())
 
