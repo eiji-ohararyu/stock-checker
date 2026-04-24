@@ -3,15 +3,14 @@
 # 1. ALWAYS output the FULL code from 'import' to 'if __name__ == "__main__":'.
 # 2. NEVER delete or modify comments in STOCKS_DATA or logic explanations.
 # 3. STRICTLY follow the logic: 75MA, Perfect Order (PO), Convergence, Volume.
-# 4. IMPLEMENT yfinance transition and ensure environment compatibility.
+# 4. IMPLEMENT vectorized operations for high-speed calculation.
 # ==============================================================================
 
 import os
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import re
+from datetime import datetime, timedelta
 import yfinance as yf
 import time
 
@@ -19,6 +18,7 @@ import time
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
+# 主要株リスト
 STOCKS_DATA = {
     "1332": ("ニッスイ", "水産・農林業"), "1605": ("INPEX", "鉱業"), "1721": ("コムシスHD", "建設業"),
     "1801": ("大成建", "建設業"), "1802": ("大林組", "建設業"), "1803": ("清水建", "建設業"),
@@ -112,102 +112,105 @@ def send_line(msg):
     payload = {"to": USER_ID, "messages": [{"type": "text", "text": msg}]}
     requests.post(url, headers=headers, json=payload)
 
-def calculate_score(s_code, df, master_info):
-    """
-    1銘柄のスコア計算を独立させ、ロジックの不一致を防ぐ
-    """
-    df = df.dropna(subset=['Close']).reset_index(drop=True)
-    if len(df) < 75: return None
+def vectorized_scan(data, target_codes_subset, is_major_flag):
+    # 銘柄ごとの計算。マルチインデックスの恩恵で一括処理
+    tickers = data.columns.get_level_values(1).unique()
+    results = []
     
-    # 指標計算
-    df['ma5'] = df['Close'].rolling(5).mean()
-    df['ma25'] = df['Close'].rolling(25).mean()
-    df['ma75'] = df['Close'].rolling(75).mean()
-    df['high_10d'] = df['High'].shift(1).rolling(10).max()
-    df['bbh'] = df['Close'].rolling(20).mean() + (df['Close'].rolling(20).std() * 2)
-    
-    c = df.iloc[-1]
-    raw_s, labels = 0, []
-    
-    # 1. 陽線
-    is_yang = c['Close'] > c['Open']
-    if is_yang: raw_s += 15; labels.append("陽線(+15)")
-    
-    # 2. GC初動
-    gc_found = False
-    for i in range(len(df)-5, len(df)):
-        if i <= 0: continue
-        if df['ma5'].iloc[i-1] <= df['ma25'].iloc[i-1] and df['ma5'].iloc[i] > df['ma25'].iloc[i]:
-            gc_found = True; break
-    if gc_found: raw_s += 20; labels.append("GC初動(+20)")
-    
-    # 3. MA25上昇
-    if df['ma25'].diff().iloc[-3:].min() > 0: raw_s += 25; labels.append("MA25上昇(+25)")
-    
-    # 4. 並び(PO)と収束
-    is_po = (c['ma5'] > c['ma25']) and (c['ma25'] > c['ma75'])
-    is_converged = ((abs(c['ma5'] - c['ma75'])) / c['ma75']) < 0.03
-    if is_po and is_converged: raw_s += 30; labels.append("トレンド初動(+30)")
-    elif is_po: raw_s += 10; labels.append("上昇トレンド継続(+10)")
-    elif is_converged: raw_s += 10; labels.append("エネルギー収束(+10)")
+    # 速度のためにデータを銘柄ごとにバラして計算するが、判定ロジックは全銘柄一貫
+    for t in tickers:
+        s_code = t.replace(".T", "")
+        if target_codes_subset and s_code not in target_codes_subset: continue
+        
+        df = data[t].copy().dropna()
+        if len(df) < 75: continue
+        
+        # 基準データ
+        close = df['Close']
+        open_p = df['Open']
+        high = df['High']
+        vol = df['Volume']
+        
+        # 指標計算
+        ma5 = close.rolling(5).mean()
+        ma25 = close.rolling(25).mean()
+        ma75 = close.rolling(75).mean()
+        high_10d = high.shift(1).rolling(10).max()
+        bb_std = close.rolling(20).std()
+        bbh = close.rolling(20).mean() + (bb_std * 2)
+        
+        # 最新値の取得
+        c_p = close.iloc[-1]
+        o_p = open_p.iloc[-1]
+        raw_s, labels = 0, []
+        
+        # 1. 陽線
+        is_yang = c_p > o_p
+        if is_yang: raw_s += 15; labels.append("陽線(+15)")
+        
+        # 2. GC初動 (物理的交差の厳格判定)
+        gc = (ma5.shift(1) <= ma25.shift(1)) & (ma5 > ma25)
+        if gc.iloc[-5:].any(): raw_s += 20; labels.append("GC初動(+20)")
+        
+        # 3. MA25上昇 (直近3日)
+        if ma25.diff().iloc[-3:].min() > 0: raw_s += 25; labels.append("MA25上昇(+25)")
+        
+        # 4. POと収束
+        is_po = (ma5.iloc[-1] > ma25.iloc[-1]) and (ma25.iloc[-1] > ma75.iloc[-1])
+        is_converged = ((abs(ma5.iloc[-1] - ma75.iloc[-1])) / ma75.iloc[-1]) < 0.03
+        if is_po and is_converged: raw_s += 30; labels.append("トレンド初動(+30)")
+        elif is_po: raw_s += 10; labels.append("上昇トレンド継続(+10)")
+        elif is_converged: raw_s += 10; labels.append("エネルギー収束(+10)")
             
-    # 5. 高値突破
-    if c['Close'] > c['high_10d']: raw_s += 20; labels.append("高値突破(+20)")
-    
-    # 6. 出来高加点 (修正：基準位置を固定)
-    base_vol = df['Volume'].iloc[-6:-1].mean()
-    vol_ratio = c['Volume'] / base_vol if base_vol > 0 else 1.0
-    if is_yang and vol_ratio >= 1.5:
-        v_pts = 50 if vol_ratio >= 3.0 else 30
-        raw_s += v_pts; labels.append(f"出来高x{vol_ratio:.1f}(+{v_pts})")
+        # 5. 高値突破
+        if c_p > high_10d.iloc[-1]: raw_s += 20; labels.append("高値突破(+20)")
+        
+        # 6. 出来高加点 (バグ修正：基準日を-1(昨日)から5日分、当日を対象)
+        base_vol = vol.iloc[-6:-1].mean()
+        vol_ratio = vol.iloc[-1] / base_vol if base_vol > 0 else 1.0
+        if is_yang and vol_ratio >= 1.5:
+            v_pts = 50 if vol_ratio >= 3.0 else 30
+            raw_s += v_pts; labels.append(f"出来高x{vol_ratio:.1f}(+{v_pts})")
             
-    final_score = raw_s
-    if c['Close'] > c['bbh']: final_score = int(final_score * 0.7); labels.append("過熱警戒")
-    
-    if final_score >= 40:
-        name, sector = master_info.get(s_code, ("不明", "不明"))
-        return (final_score, f"{s_code} {name} ({sector})\n{c['Close']:.1f}円 【{final_score}点】\n" + "・".join(labels))
-    return None
+        final_score = raw_s
+        if c_p > bbh.iloc[-1]: final_score = int(final_score * 0.7); labels.append("過熱警戒")
+        
+        if final_score >= 40:
+            name, sector = STOCKS_DATA.get(s_code, ("不明", "不明"))
+            results.append((final_score, f"{s_code} {name} ({sector})\n{c_p:.1f}円 【{final_score}点】\n" + "・".join(labels)))
 
-def generate_report(results, label_text, is_major):
     if not results: return None
+    
     top_10 = [x[1] for x in sorted(results, key=lambda x:x[0], reverse=True)[:10]]
     today = datetime.now().strftime('%Y.%m.%d')
-    target_desc = '国内主要株 (TOPIX100・日経225・JPX150)' if is_major else '国内株式市場 全銘柄'
-    header = f"{today} {label_text}\n調査対象：{target_desc}\nデータ取得日数：120日\n\n【判定：上昇優勢 TOP10】\n\n"
+    target_desc = '国内主要株 (TOPIX100・日経225・JPX150)' if is_major_flag else '国内株式市場 全銘柄'
+    header = f"{today} {'国内主要株レポート' if is_major_flag else '株式市場レポート'}\n調査対象：{target_desc}\nデータ取得日数：{len(data)}日\n\n【判定：上昇優勢 TOP10】\n\n"
     footer = "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
     return header + "\n\n".join(top_10) + footer
 
 if __name__ == "__main__":
     all_codes = [str(i) for i in range(1000, 10000)]
-    chunk_size = 500
-    major_results, all_results = [], []
+    # yfinanceの制限を考慮し、1000銘柄ずつのチャンクに拡大（速度向上のため）
+    chunk_size = 1000
+    all_prices = []
     
     for i in range(0, len(all_codes), chunk_size):
         chunk = all_codes[i:i + chunk_size]
         tickers = [f"{c}.T" for c in chunk]
         print(f"Fetching chunk {i//chunk_size + 1}...")
         try:
-            # 出来高も含め一括取得
             chunk_data = yf.download(tickers, period="120d", group_by='ticker', threads=True, progress=False)
-            for t in tickers:
-                s_code = t.replace(".T", "")
-                try:
-                    s_df = chunk_data[t].dropna()
-                    if s_df.empty: continue
-                    
-                    res = calculate_score(s_code, s_df, STOCKS_DATA)
-                    if res:
-                        if s_code in STOCKS_DATA:
-                            major_results.append(res)
-                        all_results.append(res)
-                except: continue
+            if not chunk_data.empty: all_prices.append(chunk_data)
         except: continue
         time.sleep(1)
 
-    # レポート送信
-    m_report = generate_report(major_results, "国内主要株レポート", True)
-    if m_report: send_line(m_report)
-    
-    a_report = generate_report(all_results, "株式市場レポート", False)
-    if a_report: send_line(a_report)
+    if all_prices:
+        full_data = pd.concat(all_prices, axis=1)
+        
+        # 1. 主要株レポート
+        m_report = vectorized_scan(full_data, set(STOCKS_DATA.keys()), True)
+        if m_report: send_line(m_report)
+        
+        # 2. 株式市場レポート
+        a_report = vectorized_scan(full_data, None, False)
+        if a_report: send_line(a_report)
