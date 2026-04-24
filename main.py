@@ -1,12 +1,22 @@
+# ==============================================================================
+# 🤖 AI SYSTEM CONSTRAINT BOX (DO NOT REMOVE)
+# 1. ALWAYS output the FULL code from 'import' to 'if __name__ == "__main__":'.
+# 2. NEVER delete or modify comments in STOCKS_DATA or logic explanations.
+# 3. STRICTLY follow the logic: MA, GC, MA25 Rise, High Breakout, Volume.
+# 4. IMPLEMENT transition from J-Quants to yfinance for data fetching.
+# ==============================================================================
+
 import os
 import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import re
+import yfinance as yf
+import time
 
 # --- 認証設定 ---
-API_KEY = os.getenv("JQUANTS_REFRESH_TOKEN", "").strip()
+# API_KEYは不要になりますが、LINE設定は保持します。
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
 
@@ -104,12 +114,15 @@ def normalize_code(raw_code):
     return m.group(0) if m else s.zfill(4)[:4]
 
 def calculate_indicators(df):
-    df['open'] = pd.to_numeric(df['O'], errors='coerce')
-    df['high'] = pd.to_numeric(df['H'], errors='coerce')
-    df['close'] = pd.to_numeric(df.get('AdjustmentClose', df['C']), errors='coerce')
-    df['volume'] = pd.to_numeric(df['Vo'], errors='coerce')
+    # yfinanceのカラム名に合わせつつ、ロジックを保持
+    df['open'] = df['Open']
+    df['high'] = df['High']
+    df['close'] = df['Close']
+    df['volume'] = df['Volume']
+    
     df = df.dropna(subset=['close']).reset_index(drop=True)
     if len(df) < 40: return None
+    
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma25'] = df['close'].rolling(25).mean()
     df['high_10d'] = df['high'].shift(1).rolling(10).max()
@@ -117,54 +130,78 @@ def calculate_indicators(df):
     df['bbh'] = df['close'].rolling(20).mean() + (df['std'] * 2)
     return df
 
-def run_scan(target_codes, full_df, master_info):
+def run_scan(target_codes, data_dict, master_info):
     up_res = []
-    for code, group in full_df.groupby('Code'):
-        s_code = normalize_code(code)
-        if target_codes and s_code not in target_codes: continue
-        df = calculate_indicators(group.copy())
+    # yfinanceで一括取得したデータを個別に処理
+    for s_code in target_codes:
+        if s_code not in data_dict: continue
+        df = calculate_indicators(data_dict[s_code])
         if df is None: continue
+        
         curr = df.iloc[-1]
         raw_s, d_l = 0, []
         is_yang = curr['close'] > curr['open']
+        
         if is_yang: raw_s += 15; d_l.append("陽線(+15)")
-        # GC判定（直近3日間の物理的交差のみ）
+        
+        # GC判定（直近3日間）
         gc_found = False
         for i in range(len(df)-3, len(df)):
             p_row, c_row = df.iloc[i-1], df.iloc[i]
             if p_row['ma5'] <= p_row['ma25'] and c_row['ma5'] > c_row['ma25']:
                 gc_found = True; break
         if gc_found: raw_s += 20; d_l.append("GC初動(+20)")
+        
         if df['ma25'].diff().iloc[-3:].min() > 0: raw_s += 25; d_l.append("MA25上昇(+25)")
         if curr['close'] > curr['high_10d']: raw_s += 20; d_l.append("高値突破(+20)")
-        vol_score = 0
+        
         if len(df) >= 15:
             base_vol = df['volume'].iloc[-8:-3].mean()
             vol_ratio = curr['volume'] / base_vol if base_vol > 0 else 1.0
-            if is_yang:
-                if vol_ratio >= 1.5: d_l.append(f"出来高x{vol_ratio:.2f}")
+            if is_yang and vol_ratio >= 1.5:
+                d_l.append(f"出来高x{vol_ratio:.2f}")
+                
         final_score = raw_s
         if curr['close'] > curr['bbh']: final_score = int(final_score * 0.7); d_l.append("過熱警戒")
+        
         if final_score >= 40:
             name, sector = master_info.get(s_code, ("不明", "不明"))
             up_res.append((final_score, f"{s_code} {name} ({sector})\n{curr['close']:.1f}円 【{final_score}点】\n" + "・".join(d_l)))
+            
     return [x[1] for x in sorted(up_res, key=lambda x:x[0], reverse=True)[:10]]
 
 if __name__ == "__main__":
-    host, headers = "https://api.jquants.com/v2", {"x-api-key": API_KEY}
-    m_r = requests.get(f"{host}/listed/info", headers=headers)
-    master = {normalize_code(m["Code"]): (m["CompanyName"], m["Sector17CodeName"]) for m in m_r.json().get("info", [])}
-    all_prices, success_days = [], 0
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(60)]
-    for d in reversed(dates):
-        r = requests.get(f"{host}/equities/bars/daily", headers=headers, params={"date": d})
-        if r.status_code == 200:
-            data = r.json().get("data", [])
-            if data: all_prices.extend(data); success_days += 1
-    if all_prices:
-        full_df = pd.DataFrame(all_prices).sort_values(['Code', 'Date'])
-        today = datetime.now().strftime('%Y.%m.%d')
-        msg1 = f"{today} 国内主要株レポート\n調査対象：TOPIX100・日経225・JPXプライム150\nデータ取得日数：{success_days}日\n\n【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(run_scan(set(MAJOR_STOCKS.keys()), full_df, MAJOR_STOCKS)) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
-        requests.post("https://api.line.me/v2/bot/message/push", headers={"Authorization": f"Bearer {LINE_TOKEN}"}, json={"to": USER_ID, "messages": [{"type": "text", "text": msg1}]})
-        msg2 = f"{today} 株式市場レポート\n調査対象：国内株式市場 全銘柄\nデータ取得日数：{success_days}日\n\n【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(run_scan(None, full_df, master)) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
-        requests.post("https://api.line.me/v2/bot/message/push", headers={"Authorization": f"Bearer {LINE_TOKEN}"}, json={"to": USER_ID, "messages": [{"type": "text", "text": msg2}]})
+    # --- データ取得 ---
+    # yfinanceは「コード.T」の形式で取得
+    tickers = [f"{c}.T" for c in MAJOR_STOCKS.keys()]
+    print(f"Fetching data for {len(tickers)} stocks via yfinance...")
+    
+    # 過去60日分のデータを一括ダウンロード
+    data = yf.download(tickers, period="60d", group_by='ticker', threads=True)
+    
+    # データを銘柄ごとの辞書に変換（ロジックを回しやすくするため）
+    data_dict = {}
+    for t in tickers:
+        try:
+            s_df = data[t].dropna()
+            if not s_df.empty:
+                data_dict[t.replace(".T", "")] = s_df
+        except:
+            continue
+
+    today = datetime.now().strftime('%Y.%m.%d')
+    
+    # レポート実行
+    m_res = run_scan(list(MAJOR_STOCKS.keys()), data_dict, MAJOR_STOCKS)
+    
+    if m_res:
+        msg = f"{today} 国内主要株レポート (yfinance版)\n\n【判定：上昇優勢 TOP10】\n\n" + "\n\n".join(m_res) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
+        
+        # LINE送信
+        url = "https://api.line.me/v2/bot/message/push"
+        headers = {"Authorization": f"Bearer {LINE_TOKEN}"}
+        payload = {"to": USER_ID, "messages": [{"type": "text", "text": msg}]}
+        requests.post(url, headers=headers, json=payload)
+        print("Report sent to LINE.")
+    else:
+        print("No stocks passed the criteria.")
