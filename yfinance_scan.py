@@ -96,7 +96,7 @@ def calculate_score(s_code, df):
         raw_s += 20
         labels.append("高値突破(+20)")
     
-    # 6. 出来高加点判定(1.5倍:+30/3倍:+40)
+    # 6. 出来高加点判定(1.5倍:+30 / 3倍:+40)
     base_vol = vol.iloc[-8:-3].mean()
     vol_ratio = vol.iloc[-1] / base_vol if base_vol > 0 else 1.0
     if c_p > open_p.iloc[-1]:
@@ -126,7 +126,7 @@ def get_ticker_info(s_code):
     except: return ("不明", "不明")
 
 # レポート文字列生成
-def generate_report(results, label_text):
+def generate_report(results, label_text, is_major):
     if not results: return None
     top_10 = sorted(results, key=lambda x: x[0], reverse=True)[:10]
     lines = []
@@ -134,7 +134,9 @@ def generate_report(results, label_text):
         name, sector = get_ticker_info(code)
         lines.append(f"{code} {name} ({sector})\n{price:.1f}円 【{score}点】\n" + "・".join(lbs))
     
-    header = f"{datetime.now().strftime('%Y.%m.%d')} {label_text}\n\n【判定：上昇優勢 TOP10】\n\n"
+    today = datetime.now().strftime('%Y.%m.%d')
+    target_desc = 'TOPIX100・日経225・JPX150' if is_major else '国内株式市場 全銘柄'
+    header = f"{today} {label_text}\n調査対象：{target_desc}\nデータ取得日数：120日\n\n【判定：上昇優勢 TOP10】\n\n"
     return header + "\n\n".join(lines) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
 
 # メイン処理
@@ -179,13 +181,13 @@ if __name__ == "__main__":
                 if res: all_results.append(res)
             except: continue
 
-    # データ統合
+    # データ統合と重複排除
     all_results.extend(major_results)
-    unique_all = {res[1]: res for res in all_results}.values()
+    unique_all = list({res[1]: res for res in all_results}.values())
 
     # レポート送信
-    send_line(generate_report(major_results, "国内主要株レポート"))
-    send_line(generate_report(list(unique_all), "株式市場レポート"))
+    send_line(generate_report(major_results, "国内主要株レポート", True))
+    send_line(generate_report(unique_all, "株式市場レポート", False))
 
 # --- AI Guidelines ---
 # 1. Never edit parts that were not explicitly requested for modification.
