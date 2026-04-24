@@ -9,7 +9,7 @@ import time
 # --- 認証・設定 ---
 LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 USER_ID = os.getenv("LINE_USER_ID", "").strip()
-FETCH_DAYS = 120  # データ取得日数
+FETCH_DAYS = 120 # データ検索日数
 
 # 国内主要株リスト (TOPIX100 / 日経225 / JPX150)
 STOCKS_DATA = {
@@ -137,7 +137,7 @@ def generate_report(results, label_text, is_major):
     
     today = datetime.now().strftime('%Y.%m.%d')
     target_desc = 'TOPIX100・日経225・JPX150' if is_major else '国内株式市場 全銘柄'
-    header = f"{today} {label_text}\n調査対象：{target_desc}\nデータ取得日数：{FETCH_DAYS}日\n\n【判定：上昇優勢 TOP10】\n\n"
+    header = f"{today} {label_text}\n調査対象：{target_desc}\nデータ検索日数：{FETCH_DAYS}日\n\n【判定：上昇優勢 TOP10】\n\n"
     return header + "\n\n".join(lines) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
 
 # メイン処理
