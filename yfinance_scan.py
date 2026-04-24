@@ -141,7 +141,7 @@ def generate_report(results, label_text):
 if __name__ == "__main__":
     major_results, all_results = [], []
     
-    # 1. 主要銘柄のスキャン（無条件）
+    # 1. 主要銘柄の計算
     print("Step 1: Processing Major Stocks...")
     major_tickers = [f"{c}.T" for c in STOCKS_DATA.keys()]
     major_data = yf.download(major_tickers, period="120d", group_by='ticker', progress=False)
@@ -154,12 +154,10 @@ if __name__ == "__main__":
             if res: major_results.append(res)
         except: continue
 
-    # 2. 全銘柄のスキャン（出来高フィルターあり）
+    # 2. 全銘柄の計算
     print("Step 2: Filtering and Processing All Stocks...")
     all_codes = [str(i) for i in range(1000, 10000)]
     all_tickers = [f"{c}.T" for c in all_codes]
-    
-    # 出来高データのみ取得
     v_data = yf.download(all_tickers, period="20d", progress=False)['Volume']
     candidates = []
     for c in all_codes:
@@ -171,7 +169,6 @@ if __name__ == "__main__":
                 candidates.append(t_key)
         except: continue
     
-    # フィルター通過銘柄の詳細取得
     if candidates:
         candidate_data = yf.download(candidates, period="120d", group_by='ticker', progress=False)
         for t in candidates:
@@ -182,9 +179,8 @@ if __name__ == "__main__":
                 if res: all_results.append(res)
             except: continue
 
-    # 主要銘柄の結果は全レポートにも含める
+    # データの統合
     all_results.extend(major_results)
-    # 重複削除
     unique_all = {res[1]: res for res in all_results}.values()
 
     # レポート送信
