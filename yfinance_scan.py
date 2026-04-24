@@ -36,7 +36,7 @@ STOCKS_DATA = {
     "9843": ("ニトリHD", "小売業"), "9983": ("ファストリ", "小売業"), "9984": ("ソフトバンクG", "情報・通信業"),
 }
 
-# LINEメッセージ送信
+# LINE通知送信
 def send_line(msg):
     if not msg: return
     url = "https://api.line.me/v2/bot/message/push"
@@ -46,7 +46,7 @@ def send_line(msg):
         requests.post(url, headers=headers, json=payload)
     except: pass
 
-# スコア算出ロジック
+# スコア算出
 def calculate_score(s_code, df):
     df = df.dropna(subset=['Close']).reset_index(drop=True)
     if len(df) < 75: return None
@@ -57,19 +57,19 @@ def calculate_score(s_code, df):
     bbh = close.rolling(20).mean() + (close.rolling(20).std() * 2)
     
     c_p = close.iloc[-1]
-    raw_s, labels = 0, [] # 合計スコア用変数
+    raw_s, labels = 0, []
     
-    # 1. 陽線判定
+    # 1. 陽線判定 (+15)
     if c_p > open_p.iloc[-1]: 
         raw_s += 15
         labels.append("陽線(+15)")
     
-    # 2. GC初動判定
+    # 2. GC初動判定 (+20)
     if ((ma5.shift(1) <= ma25.shift(1)) & (ma5 > ma25)).iloc[-5:].any():
         raw_s += 20
         labels.append("GC初動(+20)")
     
-    # 3. MA上昇判定
+    # 3. MA上昇判定(各+10)
     m5_up, m25_up = ma5.diff().iloc[-1] > 0, ma25.diff().iloc[-1] > 0
     if m5_up: 
         raw_s += 10
@@ -78,7 +78,7 @@ def calculate_score(s_code, df):
         raw_s += 10
         labels.append("25日線上昇(+10)")
     
-    # 4. トレンド判定
+    # 4. トレンド判定 (初動:+30 / 継続・収束:+10)
     is_po = (ma5.iloc[-1] > ma25.iloc[-1] > ma75.iloc[-1])
     is_converged = ((abs(ma5.iloc[-1] - ma75.iloc[-1])) / ma75.iloc[-1]) < 0.03
     if is_po and is_converged and m5_up and m25_up:
@@ -91,12 +91,12 @@ def calculate_score(s_code, df):
         raw_s += 10
         labels.append("エネルギー収束(+10)")
             
-    # 5. 高値突破判定
+    # 5. 高値突破判定 (+20)
     if c_p > high_10d.iloc[-1]: 
         raw_s += 20
         labels.append("高値突破(+20)")
     
-    # 6. 出来高加点判定
+    # 6. 出来高加点判定(1.5倍:+30 / 3倍:+40)
     base_vol = vol.iloc[-8:-3].mean()
     vol_ratio = vol.iloc[-1] / base_vol if base_vol > 0 else 1.0
     if c_p > open_p.iloc[-1]:
@@ -107,7 +107,7 @@ def calculate_score(s_code, df):
             raw_s += 30
             labels.append(f"出来高x{vol_ratio:.1f}(+30)")
             
-    # 7. 過熱警戒減点
+    # 7. 過熱警戒判定(-20)
     final_score = raw_s
     if c_p > bbh.iloc[-1]:
         final_score -= 20
@@ -115,7 +115,7 @@ def calculate_score(s_code, df):
     
     return (final_score, s_code, c_p, labels)
 
-# 銘柄情報の取得
+# 銘柄情報取得
 def get_ticker_info(s_code):
     if s_code in STOCKS_DATA: return STOCKS_DATA[s_code]
     try:
@@ -125,7 +125,7 @@ def get_ticker_info(s_code):
         return (name, sector)
     except: return ("不明", "不明")
 
-# レポート文字列の生成
+# レポート文字列生成
 def generate_report(results, label_text):
     if not results: return None
     top_10 = sorted(results, key=lambda x: x[0], reverse=True)[:10]
@@ -137,7 +137,7 @@ def generate_report(results, label_text):
     header = f"{datetime.now().strftime('%Y.%m.%d')} {label_text}\n\n【判定：上昇優勢 TOP10】\n\n"
     return header + "\n\n".join(lines) + "\n\n───────────────\n詳細確認: https://www.sbisec.co.jp/ETGate/"
 
-# メイン処理ブロック
+# メイン処理
 if __name__ == "__main__":
     all_codes = [str(i) for i in range(1000, 10000)]
     major_results, all_results = [], []
@@ -156,7 +156,7 @@ if __name__ == "__main__":
     targets = list(set(candidates + [f"{c}.T" for c in STOCKS_DATA.keys()]))
     print(f"Scoring {len(targets)} stocks...")
 
-    # 精密スキャンの実行
+    # スキャン実行
     full_data = yf.download(targets, period="120d", group_by='ticker', progress=False)
     for t in targets:
         code = t.replace(".T", "")
